@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package cms_wta;
+
+option go_package = "pkg/pb";
+
+import "google/protobuf/empty.proto";
+
+message WTAWeaponInfo {
+    uint32 ID = 1;
+    float MaxRange = 2;
+    float MinRange = 3;
+    float MaxAltitude = 4;
+    float MinAltitude = 5;
+    float AzimuthFromDeg = 6;
+    float AzimuthToDeg = 7;
+    float ElevationMaxDeg = 8;
+    float ElevationMinDeg = 9;
+    uint32 MaxShotsPerTarget = 10;
+    uint32 RoundsPerBurst = 11;
+    float BurstInterval = 12;
+    float ReloadTime = 13;
+    string Code = 14;
+    uint32 Type = 15;
+}
+
+message GetAllWTAWeaponInfoResponse {
+    repeated WTAWeaponInfo Result = 1;
+}
+
+service WTAWeaponInfoService {
+    rpc getAll(google.protobuf.Empty) returns (GetAllWTAWeaponInfoResponse);
+}
+
+message WTATargetInfo {
+    uint32 ID = 1;
+    string Code = 2;
+    string Description = 3;
+    uint32 Type = 4;
+}
+
+message GetAllWTATargetInfoResponse {
+    repeated WTATargetInfo Result = 1;
+}
+
+service WTATargetInfoService {
+    rpc getAll(google.protobuf.Empty) returns (GetAllWTATargetInfoResponse);
+}
+
+message ProbabilityTable {
+    float Score = 1;
+    string WTAWeaponInfoCode = 2;
+    string WTATargetInfoCode = 3;
+}
+
+message GetAllProbabilityTableResponse {
+    repeated ProbabilityTable Result = 1;
+}
+
+service ProbabilityTableService {
+    rpc getAll(google.protobuf.Empty) returns (GetAllProbabilityTableResponse);
+}
+
+message WTAVessel {
+    uint32 ID = 1;
+    float Latitude = 2;
+    float Longitude = 3;
+    float Altitude = 4;
+    float Speed = 5;
+    float Heading = 6;
+    float DefenseRadius = 7;
+}
+
+message WTAWeapon {
+    uint32 ID = 1;
+    uint32 WTAVesselID = 2;
+    uint64 Ammo = 3;
+    string WTAWeaponInfoCode = 4;
+    uint32 Status = 5;
+}
+
+message WTATarget {
+    uint32 ID = 1;
+    string WTATargetInfoCode = 2;
+    float Latitude = 3;
+    float Longitude = 4;
+    float Altitude = 5;
+    float Speed = 6;
+    float Heading = 7;
+    float ThreatScore = 8;
+}
+
+message WTAAssignment {
+    uint32 WTAVesselID = 1;
+    uint32 WTAWeaponID = 2;
+    uint32 WTATargetID = 3;
+    uint64 AmmoUsed = 4;
+    float PKill = 5;
+    float FireTime = 6;
+    float EndTime = 7;
+}
+
+message WTAAssignmentRequest {
+    repeated WTATarget targets = 1;
+    repeated WTAVessel vessels = 2;
+    repeated WTAWeapon weapons = 3;
+}
+
+message WTAAssignmentResponse {
+    repeated WTAAssignment assignments = 1;
+}
+
+message WTACalculatorRequest {
+    string RequestID = 1;
+    WTAAssignmentRequest WTAAssignmentRequest = 2;
+    uint32 Status = 3;
+}
+
+message WTACalculatorUpdateStatus {
+    string RequestID = 1;
+    uint32 Status = 2;
+}
+
+message WTACalculatorUpdateResponse {
+    string RequestID = 1;
+    WTAAssignmentResponse WTAAssignmentResponse = 2;
+    uint32 Status = 3;
+}
+
+service WTACalculatorService {
+    rpc updateStatus (WTACalculatorUpdateStatus) returns (WTACalculatorUpdateStatus);
+    rpc updateResponse (WTACalculatorUpdateResponse) returns (WTACalculatorUpdateResponse);
+}
