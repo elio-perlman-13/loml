@@ -110,6 +110,7 @@ message WTAAssignmentResponse {
     repeated WTAAssignment assignments = 1;
 }
 
+
 message WTACalculatorRequest {
     string RequestID = 1;
     WTAAssignmentRequest WTAAssignmentRequest = 2;
@@ -131,3 +132,5 @@ service WTACalculatorService {
     rpc updateStatus (WTACalculatorUpdateStatus) returns (WTACalculatorUpdateStatus);
     rpc updateResponse (WTACalculatorUpdateResponse) returns (WTACalculatorUpdateResponse);
 }
+
+
