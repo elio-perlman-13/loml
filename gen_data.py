@@ -2,6 +2,10 @@
 """
 WTA Scenario Data Generator
 Outputs JSON matching CMS_WTA.proto schema (WTAAssignmentRequest + catalogs).
+
+Coordinate system: flat-earth Cartesian, km, relative to vessel 1.
+  X = East, Y = North, Z = Up
+Speeds in km/s.  Heading vectors are unit 3-D vectors (X, Y, Z).
 """
 
 import json
@@ -11,9 +15,9 @@ import argparse
 
 random.seed(42)
 
-# ── Geo constants (at ~10°N) ───────────────────────────────────────────────────
-LAT_M = 111_000.0
-LON_M = 111_000.0 * math.cos(math.radians(10.5))
+# ── Weapon ranges are in metres in the catalogue; internally we work in km ─────
+M2KM = 1e-3
+KM2M = 1e3
 
 # ── Weapon Info Catalog ────────────────────────────────────────────────────────
 #  Type 1 = SAM (Tên lửa phòng không)
@@ -112,31 +116,31 @@ PROB_TABLE = [
 # primary: weapons used to place the target in a valid envelope during generation
 TARGET_PROPS = {
     # ASM: sea-skimming 3–15 m, Mach 0.85–0.9 (~290–310 m/s)
-    "TGT_ASM":        dict(speed=(270, 310), alt=(3,   15),   threat=(0.85, 1.00),
+    "TGT_ASM":        dict(speed=(270, 310), alt=(3,   15),   threat=(0.85, 1.00), pitch=(-0.5,  0.5),
                            primary=["TCDT_BV15", "AK630_PORT", "AK630_STBD", "SAM_PK"]),
     # Fighter: high-alt, fast
-    "TGT_FIGHTER":    dict(speed=(200, 320), alt=(500, 6000), threat=(0.65, 0.90),
+    "TGT_FIGHTER":    dict(speed=(200, 320), alt=(500, 6000), threat=(0.65, 0.90), pitch=(-30.0, 20.0),
                            primary=["SAM_PK"]),
     # Helicopter: slow, low
-    "TGT_HELICOPTER": dict(speed=(25,  70),  alt=(20,  400),  threat=(0.35, 0.65),
+    "TGT_HELICOPTER": dict(speed=(25,  70),  alt=(20,  400),  threat=(0.35, 0.65), pitch=(-10.0, 10.0),
                            primary=["SAM_PK", "AK630_PORT", "AK630_STBD"]),
     # Fixed-wing UAV
-    "TGT_UAV_FIXED":  dict(speed=(30,  80),  alt=(100, 800),  threat=(0.45, 0.75),
+    "TGT_UAV_FIXED":  dict(speed=(30,  80),  alt=(100, 800),  threat=(0.45, 0.75), pitch=(-5.0,  5.0),
                            primary=["TCDT_BV15", "AK630_PORT", "AK630_STBD"]),
     # Rotary UAV: very slow, low
-    "TGT_UAV_ROTOR":  dict(speed=(5,   30),  alt=(10,  200),  threat=(0.40, 0.70),
+    "TGT_UAV_ROTOR":  dict(speed=(5,   30),  alt=(10,  200),  threat=(0.40, 0.70), pitch=(-8.0,  8.0),
                            primary=["TCDT_BV15", "AK630_PORT", "AK630_STBD"]),
-    # Kamikaze drone: medium speed, low-mid alt
-    "TGT_KAMIKAZE":   dict(speed=(50, 130),  alt=(20,  500),  threat=(0.55, 0.85),
+    # Kamikaze drone: medium speed, low-mid alt, dives at terminal phase
+    "TGT_KAMIKAZE":   dict(speed=(50, 130),  alt=(20,  500),  threat=(0.55, 0.85), pitch=(-15.0, 5.0),
                            primary=["TCDT_BV15", "AK630_PORT", "AK630_STBD"]),
     # Surface warship: slow, at sea level
-    "TGT_SURFACE":    dict(speed=(8,   20),  alt=(0,   5),    threat=(0.60, 0.95),
+    "TGT_SURFACE":    dict(speed=(8,   20),  alt=(0,   5),    threat=(0.60, 0.95), pitch=(0.0,  0.0),
                            primary=["VCM", "AK176"]),
     # USV: small, fast unmanned surface vessel
-    "TGT_USV":        dict(speed=(15,  35),  alt=(0,   3),    threat=(0.40, 0.70),
+    "TGT_USV":        dict(speed=(15,  35),  alt=(0,   3),    threat=(0.40, 0.70), pitch=(0.0,  0.0),
                            primary=["AK176", "AK630_PORT", "AK630_STBD"]),
     # Torpedo: very fast underwater – treat altitude as slightly negative
-    "TGT_TORPEDO":    dict(speed=(20,  40),  alt=(-3,  0),    threat=(0.50, 0.80),
+    "TGT_TORPEDO":    dict(speed=(20,  40),  alt=(-3,  0),    threat=(0.50, 0.80), pitch=(0.0,  0.0),
                            primary=["AK176", "AK630_PORT", "AK630_STBD"]),
 }
 
@@ -193,19 +197,19 @@ def randomize_scenario_params(n_targets: int = 100, n_weapons_per_vessel: int = 
 
     return target_counts, weapon_dist, ammo_range
 
-# ── Geometry helpers ───────────────────────────────────────────────────────────
+# ── Geometry helpers (all distances in km) ────────────────────────────────────
 
-def place_at(vessel_lat, vessel_lon, range_m, azimuth_deg):
-    """Return (lat, lon) at given range and azimuth from vessel."""
+def place_at_km(origin_x, origin_y, range_km, azimuth_deg):
+    """Return (x, y) km offset from origin at given range and azimuth."""
     az = math.radians(azimuth_deg)
-    lat = vessel_lat + (range_m * math.cos(az)) / LAT_M
-    lon = vessel_lon + (range_m * math.sin(az)) / LON_M
-    return lat, lon
+    return (
+        round(origin_x + range_km * math.sin(az), 4),
+        round(origin_y + range_km * math.cos(az), 4),
+    )
 
-def bearing_to(from_lat, from_lon, to_lat, to_lon):
-    dy = (to_lat - from_lat) * LAT_M
-    dx = (to_lon - from_lon) * LON_M
-    return math.degrees(math.atan2(dx, dy)) % 360
+def bearing_to_km(fx, fy, tx, ty):
+    """Azimuth (deg, 0=North CW) from point f to point t."""
+    return math.degrees(math.atan2(tx - fx, ty - fy)) % 360
 
 def random_az_in_sector(az_from, az_to):
     if az_from <= az_to:
@@ -213,93 +217,198 @@ def random_az_in_sector(az_from, az_to):
     span = (az_to + 360) - az_from
     return (az_from + random.uniform(0, span)) % 360
 
-def alt_compatible(winfo, alt):
-    return winfo["MinAltitude"] <= alt <= winfo["MaxAltitude"]
+def alt_compatible(winfo, alt_km):
+    alt_m = alt_km * KM2M
+    return winfo["MinAltitude"] <= alt_m <= winfo["MaxAltitude"]
+
+# ── Threat proximity filter ───────────────────────────────────────────────────
+# A target is "proximity-threatening" to a vessel only if its predicted
+# straight-line trajectory passes within this radius (km).
+# ~3 km ≈ inner defensive bubble / CIWS effective range.
+THREAT_RADIUS_KM = 3.0
+
+def min_approach_km(target, vessel):
+    """Minimum distance (km) between target's straight-line trajectory and vessel."""
+    dx0 = target["X"] - vessel["X"]
+    dy0 = target["Y"] - vessel["Y"]
+    dz0 = target["Z"] - vessel["Z"]
+    spd_tgt  = target["Speed"] * M2KM
+    v_vessel = vessel["Speed"]  * M2KM
+    vx = target["VX"] * spd_tgt - v_vessel * vessel["HeadingX"]
+    vy = target["VY"] * spd_tgt - v_vessel * vessel["HeadingY"]
+    vz = target["VZ"] * spd_tgt  # HeadingZ = 0 for surface ships
+    v2 = vx**2 + vy**2 + vz**2
+    if v2 < 1e-12:
+        return math.sqrt(dx0**2 + dy0**2 + dz0**2)
+    t_star = -(dx0*vx + dy0*vy + dz0*vz) / v2
+    if t_star < 0:
+        return math.sqrt(dx0**2 + dy0**2 + dz0**2)
+    dx = dx0 + vx * t_star
+    dy = dy0 + vy * t_star
+    dz = dz0 + vz * t_star
+    return math.sqrt(dx**2 + dy**2 + dz**2)
 
 # ── Engagement window (computed from trajectory) ───────────────────────────────
 
-def compute_engagement_window(vessel, winfo, target, dt=0.1, t_max=120.0):
+def compute_engagement_window(vessel, winfo, target, t_max=60.0):
     """
-    Numerically sweep target trajectory to find [a_ij, b_ij].
-    Returns (a, b) or None if target never enters envelope.
+    Analytically find [a_ij, b_ij] in seconds.
+
+    The target trajectory is a parametric line in the vessel's reference frame:
+        P(t) = P0 + t * V_rel,   where V_rel = V_target - V_vessel
+
+    We find every t where P(t) crosses a boundary surface:
+      1. Two spheres  |P|² = R²          — slant range (MinRange, MaxRange)
+      2. Two half-planes  dx·cosθ = dy·sinθ  — azimuth sector boundaries
+      3. Two elevation cones  dz² = tan²(el)·(dx²+dy²)  — elevation limits
+      4. Two horizontal planes  dz = alt_bound  — altitude limits
+
+    Boundary crossings partition [0, t_max] into sub-intervals in which every
+    constraint is monotone, so checking one midpoint per interval is exact.
     """
-    vx = vessel["Longitude"];  vy = vessel["Latitude"]
-    tx0 = target["Longitude"]; ty0 = target["Latitude"]; alt0 = target["Altitude"]
-    spd = target["Speed"];     hdg = math.radians(target["Heading"])
+    eps = 1e-9
 
-    v_spd = target.get("VerticalSpeed", 0.0)
+    # ── Relative initial position (km) ────────────────────────────────────────
+    dx0 = target["X"] - vessel["X"]
+    dy0 = target["Y"] - vessel["Y"]
+    dz0 = target["Z"] - vessel["Z"]
 
-    a, b = None, None
-    t = 0.0
-    while t <= t_max:
-        # target position at time t
-        tx = tx0 + (spd * math.sin(hdg) * t) / LON_M
-        ty = ty0 + (spd * math.cos(hdg) * t) / LAT_M
-        alt = alt0 + v_spd * t
+    # ── Relative velocity: V_target − V_vessel (km/s) ─────────────────────────
+    spd_tgt  = target["Speed"] * M2KM          # target speed in km/s
+    v_vessel = vessel["Speed"] * M2KM          # vessel speed in km/s
+    vx = target["VX"] * spd_tgt - v_vessel * vessel["HeadingX"]
+    vy = target["VY"] * spd_tgt - v_vessel * vessel["HeadingY"]
+    vz = target["VZ"] * spd_tgt - v_vessel * vessel["HeadingZ"]   # HeadingZ=0 for ships
 
-        dx = (tx - vx) * LON_M
-        dy = (ty - vy) * LAT_M
-        rng = math.hypot(dx, dy)
-        az  = math.degrees(math.atan2(dx, dy)) % 360
-        el  = math.degrees(math.atan2(alt, rng)) if rng > 0 else 90.0
+    # ── Weapon envelope in km ─────────────────────────────────────────────────
+    r_min = winfo["MinRange"]    * M2KM
+    r_max = winfo["MaxRange"]    * M2KM
+    a_min = winfo["MinAltitude"] * M2KM
+    a_max = winfo["MaxAltitude"] * M2KM
 
-        # azimuth check (handles wrap-around)
+    def quadratic_roots(A, B, C):
+        """Real roots of A·t²+B·t+C=0 inside [0, t_max]."""
+        roots = []
+        if abs(A) > eps:
+            disc = B**2 - 4*A*C
+            if disc >= 0:
+                sq = math.sqrt(disc)
+                for t in ((-B - sq) / (2*A), (-B + sq) / (2*A)):
+                    if 0.0 <= t <= t_max:
+                        roots.append(t)
+        elif abs(B) > eps:              # degenerate linear case
+            t = -C / B
+            if 0.0 <= t <= t_max:
+                roots.append(t)
+        return roots
+
+    candidates = [0.0, t_max]
+
+    # 1. Sphere intersections: |P(t)|² = R²  (3-D slant range)
+    #    |V|²·t² + 2(P0·V)·t + (|P0|²−R²) = 0
+    A3 = vx**2 + vy**2 + vz**2
+    B3 = 2.0 * (dx0*vx + dy0*vy + dz0*vz)
+    C3 = dx0**2 + dy0**2 + dz0**2
+    for R in (r_min, r_max):
+        candidates += quadratic_roots(A3, B3, C3 - R**2)
+
+    # 2. Azimuth half-planes through Z-axis: dx·cos(θ) − dy·sin(θ) = 0  →  linear
+    #    t = −(dx0·cosθ − dy0·sinθ) / (vx·cosθ − vy·sinθ)
+    for az_deg in (winfo["AzimuthFromDeg"], winfo["AzimuthToDeg"]):
+        th    = math.radians(az_deg)
+        denom = vx*math.cos(th) - vy*math.sin(th)
+        if abs(denom) > eps:
+            t = -(dx0*math.cos(th) - dy0*math.sin(th)) / denom
+            if 0.0 <= t <= t_max:
+                candidates.append(t)
+
+    # 3. Elevation cones: dz² = tan²(el)·(dx²+dy²)  →  quadratic
+    #    [vz²−tan²·(vx²+vy²)]·t² + 2[dz0·vz−tan²·(dx0·vx+dy0·vy)]·t
+    #     + [dz0²−tan²·(dx0²+dy0²)] = 0
+    for el_deg in (winfo["ElevationMinDeg"], winfo["ElevationMaxDeg"]):
+        tan_el = math.tan(math.radians(el_deg))
+        t2     = tan_el**2
+        Ah = vx**2 + vy**2
+        Bh = dx0*vx + dy0*vy
+        Ch = dx0**2 + dy0**2
+        candidates += quadratic_roots(vz**2 - t2*Ah,
+                                      2*(dz0*vz - t2*Bh),
+                                      dz0**2   - t2*Ch)
+
+    # 4. Altitude planes: dz(t) = alt_bound  →  linear
+    if abs(vz) > eps:
+        for ab in (a_min, a_max):
+            t = (ab - dz0) / vz
+            if 0.0 <= t <= t_max:
+                candidates.append(t)
+
+    candidates = sorted(set(candidates))
+
+    def in_envelope(t):
+        dx   = dx0 + vx * t
+        dy   = dy0 + vy * t
+        dz   = dz0 + vz * t
+        rng  = math.sqrt(dx**2 + dy**2 + dz**2)   # 3-D slant range
+        rng_h = math.hypot(dx, dy)                  # horizontal range for az/el
+        if rng_h < eps:
+            return False
+        az   = math.degrees(math.atan2(dx, dy)) % 360
+        el   = math.degrees(math.atan2(dz, rng_h))
         af, at_ = winfo["AzimuthFromDeg"], winfo["AzimuthToDeg"]
-        if af <= at_:
-            az_ok = af <= az <= at_
-        else:
-            az_ok = az >= af or az <= at_
-
-        in_envelope = (
-            winfo["MinRange"]    <= rng <= winfo["MaxRange"]    and
-            winfo["MinAltitude"] <= alt <= winfo["MaxAltitude"] and
-            az_ok and
+        az_ok = (af <= az <= at_) if af <= at_ else (az >= af or az <= at_)
+        return (
+            r_min <= rng  <= r_max  and
+            a_min <= dz   <= a_max  and
+            az_ok                   and
             winfo["ElevationMinDeg"] <= el <= winfo["ElevationMaxDeg"]
         )
 
-        if in_envelope and a is None:
-            a = t
-        elif not in_envelope and a is not None:
-            b = t - dt
-            break
+    a = None
+    for i in range(len(candidates) - 1):
+        mid = (candidates[i] + candidates[i + 1]) / 2.0
+        if in_envelope(mid):
+            if a is None:
+                a = candidates[i]
+            b = candidates[i + 1]
+        else:
+            if a is not None:
+                if b - a >= 1.0:
+                    return (round(a, 2), round(b, 2))  # first valid window
+                a = None  # too short, keep looking
+    if a is not None and b - a >= 1.0:
+        return (round(a, 2), round(b, 2))
 
-        t += dt
-
-    if a is not None and b is None:
-        b = t_max  # still in envelope at end of horizon
-    return (round(a, 2), round(b, 2)) if a is not None else None
+    return None
 
 # ── Generators ─────────────────────────────────────────────────────────────────
 
 def _heading_vec(azimuth_deg: float, pitch_deg: float = 0.0):
-    """Convert azimuth (0=North, CW) + pitch (deg, positive=up) to a
-    normalised 3-D unit vector in (East, North, Up) frame."""
+    """Unit vector (X=East, Y=North, Z=Up) from azimuth + pitch."""
     az  = math.radians(azimuth_deg)
     pit = math.radians(pitch_deg)
     cos_p = math.cos(pit)
-    return {
-        "x": round(math.sin(az) * cos_p, 6),   # East
-        "y": round(math.cos(az) * cos_p, 6),   # North
-        "z": round(math.sin(pit),        6),   # Up
-    }
+    return (
+        round(math.sin(az) * cos_p, 6),
+        round(math.cos(az) * cos_p, 6),
+        round(math.sin(pit),        6),
+    )
 
 def generate_vessels():
+    # Vessel 1 is the origin (0, 0, 0).
+    # Vessel 2 is ~0.55 km NNE of vessel 1.
     vessels = []
-    configs = [
-        dict(ID=1, Latitude=10.5000, Longitude=107.5000, Altitude=0.0,
-             Speed=round(random.uniform(3.0, 8.0), 2),
-             HeadingDeg=round(random.uniform(0, 360), 1),
-             DefenseRadius=25_000.0),
-        dict(ID=2, Latitude=10.5045, Longitude=107.5030, Altitude=0.0,
-             Speed=round(random.uniform(3.0, 8.0), 2),
-             HeadingDeg=round(random.uniform(0, 360), 1),
-             DefenseRadius=25_000.0),
-    ]
-    for cfg in configs:
-        az  = cfg.pop("HeadingDeg")
-        hvec = _heading_vec(az)   # surface ship: pitch = 0
-        vessels.append({**cfg, "HeadingX": hvec["x"], "HeadingY": hvec["y"], "HeadingZ": hvec["z"]})
-    return vessels  # ~550 m apart
+    for vid, x, y in [(1, 0.0, 0.0), (2, 0.3, 0.45)]:
+        spd_ms = random.uniform(3.0, 8.0)          # m/s
+        spd_km = round(spd_ms * M2KM, 5)           # km/s
+        az     = random.uniform(0, 360)
+        hx, hy, _ = _heading_vec(az)               # ships stay on surface: hz=0
+        vessels.append(dict(
+            ID=vid, X=x, Y=y, Z=0.0,
+            Speed=round(spd_ms, 2),                # speed in m/s kept for reference
+            HeadingX=hx, HeadingY=hy, HeadingZ=0.0,
+            DefenseRadius=25.0,                    # km
+        ))
+    return vessels
 
 def generate_weapons(vessels, weapon_dist, ammo_range):
     weapons = []
@@ -325,45 +434,57 @@ def generate_targets(vessels, target_counts):
     for tcode, count in target_counts.items():
         props = TARGET_PROPS[tcode]
         for _ in range(count):
-            speed   = random.uniform(*props["speed"])
-            alt     = random.uniform(*props["alt"])
+            spd_ms  = random.uniform(*props["speed"])        # m/s
+            spd_km  = spd_ms * M2KM                          # km/s
+            alt_m   = random.uniform(*props["alt"])          # metres
+            alt_km  = alt_m * M2KM                           # km
             threat  = round(random.uniform(*props["threat"]), 3)
 
-            # pick vessel and primary weapon ensuring altitude compatibility
+            # pick vessel and primary weapon with compatible altitude
             vessel  = random.choice(vessels)
-            primary = [c for c in props["primary"] if alt_compatible(WI[c], alt)]
+            primary = [c for c in props["primary"] if alt_compatible(WI[c], alt_km)]
             if not primary:
-                primary = props["primary"]  # fallback (may be edge case)
+                primary = props["primary"]
             wcode   = random.choice(primary)
             winfo   = WI[wcode]
 
-            # place target: slightly outside max range so it enters within t_entry seconds
-            t_entry = random.uniform(0.5, 7.0)
-            initial_range = winfo["MaxRange"] + speed * t_entry
+            # place target outside max range so it enters within t_entry seconds
+            t_entry      = random.uniform(0.5, 7.0)
+            initial_range_km = winfo["MaxRange"] * M2KM + spd_km * t_entry
 
             # random azimuth within weapon sector
             az = random_az_in_sector(winfo["AzimuthFromDeg"], winfo["AzimuthToDeg"])
-            lat, lon = place_at(vessel["Latitude"], vessel["Longitude"], initial_range, az)
+            x0, y0 = place_at_km(vessel["X"], vessel["Y"], initial_range_km, az)
 
-            # heading toward vessel ± 10° jitter
-            hdg_to_vessel = bearing_to(lat, lon, vessel["Latitude"], vessel["Longitude"])
-            heading = (hdg_to_vessel + random.uniform(-10, 10)) % 360
+            # heading toward vessel with miss distance encoded at generation time:
+            #   80 % near-pass: miss < 3 km  →  only compute windows for these
+            #   20 % far-pass:  miss > 3 km  →  proximity filter will drop them
+            hdg_to_vessel = bearing_to_km(x0, y0, vessel["X"], vessel["Y"])
+            near_pass = random.random() < 0.80
+            if near_pass:
+                miss_km = random.uniform(0.1, 2.5)   # guaranteed < THREAT_RADIUS_KM
+            else:
+                miss_km = random.uniform(3.5, 8.0)   # guaranteed > THREAT_RADIUS_KM
+            deflect = math.degrees(math.asin(min(miss_km / initial_range_km, 1.0)))
+            hdg = (hdg_to_vessel + random.choice([-1, 1]) * deflect) % 360
+            # targets fly level (vz=0) except give tiny random pitch for realism
+            pitch = random.uniform(*props["pitch"])  # type-specific pitch range
+            pitch = 0.0 if alt_km <= 0.01 else pitch
+            hx, hy, hz = _heading_vec(hdg, pitch)
 
             targets.append(dict(
                 ID=tgt_id,
                 WTATargetInfoCode=tcode,
-                Latitude=round(lat, 7),
-                Longitude=round(lon, 7),
-                Altitude=round(alt, 1),
-                Speed=round(speed, 2),
-                Heading=round(heading, 2),
+                X=x0, Y=y0, Z=round(alt_km, 4),
+                VX=hx,                       # unit heading vector
+                VY=hy,                       # |VX,VY,VZ| = 1
+                VZ=hz,
+                Speed=round(spd_ms, 2),      # m/s; actual velocity = Speed * M2KM * (VX,VY,VZ)
                 ThreatScore=threat,
-                VerticalSpeed=0.0,  # extra field used by window computation; strip before sending
             ))
             tgt_id += 1
 
     random.shuffle(targets)
-    # re-index after shuffle
     for i, t in enumerate(targets):
         t["ID"] = i + 1
     return targets
@@ -371,61 +492,75 @@ def generate_targets(vessels, target_counts):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="data/scenario_001.json")
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-    random.seed(args.seed)
-
-    target_counts, weapon_dist, ammo_range = randomize_scenario_params()
-
-    vessels  = generate_vessels()
-    weapons  = generate_weapons(vessels, weapon_dist, ammo_range)
-    targets  = generate_targets(vessels, target_counts)
-
-    # build weapon lookup for window computation
-    wpn_info_by_id = {w["ID"]: WI[w["WTAWeaponInfoCode"]] for w in weapons}
-    vessel_by_id   = {v["ID"]: v for v in vessels}
-
-    # compute engagement windows for every (weapon, target) pair
-    print("Computing engagement windows...")
-    windows = {}
-    covered = set()
-    for wpn in weapons:
-        winfo  = wpn_info_by_id[wpn["ID"]]
-        vessel = vessel_by_id[wpn["WTAVesselID"]]
-        for tgt in targets:
-            win = compute_engagement_window(vessel, winfo, tgt)
-            if win is not None:
-                windows[f"{wpn['ID']}_{tgt['ID']}"] = win
-                covered.add(tgt["ID"])
-
-    uncovered = [t["ID"] for t in targets if t["ID"] not in covered]
-    print(f"  {len(covered)}/100 targets have at least 1 engagement window")
-    if uncovered:
-        print(f"  WARNING: targets with no window: {uncovered}")
-
-    # strip internal-only fields before output
-    for t in targets:
-        t.pop("VerticalSpeed", None)
-
-    output = dict(
-        weapon_infos=WEAPON_INFOS,
-        target_infos=TARGET_INFOS,
-        probability_table=PROB_TABLE,
-        assignment_request=dict(
-            vessels=vessels,
-            weapons=weapons,
-            targets=targets,
-        ),
-        engagement_windows=windows,  # precomputed; solver can recompute if needed
-    )
-
     import os
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(output, f, indent=2)
-    print(f"Written to {args.out}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out",    default=None,   help="Single output file (overrides --outdir/--count)")
+    parser.add_argument("--outdir", default="data", help="Output directory for batch generation")
+    parser.add_argument("--count",  type=int, default=1, help="Number of scenarios to generate")
+    parser.add_argument("--seed",   type=int, default=42)
+    args = parser.parse_args()
+
+    # resolve output paths
+    if args.out:
+        out_paths = [args.out]
+        seeds     = [args.seed]
+    else:
+        os.makedirs(args.outdir, exist_ok=True)
+        out_paths = [os.path.join(args.outdir, f"scenario_{i+1:03d}.json") for i in range(args.count)]
+        seeds     = [args.seed + i for i in range(args.count)]
+
+    for out_path, seed in zip(out_paths, seeds):
+        random.seed(seed)
+
+        target_counts, weapon_dist, ammo_range = randomize_scenario_params()
+
+        vessels  = generate_vessels()
+        weapons  = generate_weapons(vessels, weapon_dist, ammo_range)
+        targets  = generate_targets(vessels, target_counts)
+
+        # build weapon lookup for window computation
+        wpn_info_by_id = {w["ID"]: WI[w["WTAWeaponInfoCode"]] for w in weapons}
+        vessel_by_id   = {v["ID"]: v for v in vessels}
+
+        # compute engagement windows for every (weapon, target) pair
+        # targets with a far-pass trajectory (min approach > THREAT_RADIUS_KM) are skipped
+        windows = {}
+        covered = set()
+        for wpn in weapons:
+            winfo  = wpn_info_by_id[wpn["ID"]]
+            vessel = vessel_by_id[wpn["WTAVesselID"]]
+            for tgt in targets:
+                if min_approach_km(tgt, vessel) > THREAT_RADIUS_KM:
+                    continue
+                win = compute_engagement_window(vessel, winfo, tgt)
+                if win is not None:
+                    windows[f"{wpn['ID']}_{tgt['ID']}"] = win
+                    covered.add(tgt["ID"])
+
+        uncovered = [t["ID"] for t in targets if t["ID"] not in covered]
+        n_covered = len(covered)
+        warn = f"  WARNING: no window for targets {uncovered}" if uncovered else ""
+
+        # strip internal-only fields before output
+        for t in targets:
+            t.pop("VerticalSpeed", None)
+
+        output = dict(
+            weapon_infos=WEAPON_INFOS,
+            target_infos=TARGET_INFOS,
+            probability_table=PROB_TABLE,
+            assignment_request=dict(
+                vessels=vessels,
+                weapons=weapons,
+                targets=targets,
+            ),
+            engagement_windows=windows,
+        )
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(output, f, indent=2)
+        print(f"[seed={seed}] {out_path}  ({n_covered}/100 targets covered){warn}")
 
 if __name__ == "__main__":
     main()
