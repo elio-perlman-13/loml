@@ -241,5 +241,6 @@ class Solution:
                 PKill=round(1.0 - (1.0 - p) ** count, 6),
                 FireTime=min(times) if times else 0.0,
                 EndTime=max(times) + d if times else 0.0,
+                FireTimes=sorted(times),
             ))
         return result

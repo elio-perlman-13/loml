@@ -127,7 +127,8 @@ def _score(sol: Solution, wid: int, tid: int, t: float) -> float:
     Higher score → better assignment.
     """
     p    = sol.p_ij.get((wid, tid), 0.0)
-    gain = sol.survival(tid) * p
+    threat =sol.threat_score.get(tid, 0.0)
+    gain = sol.survival(tid) * p * threat
     opp  = _opp_cost(sol, wid, tid, t)
     return gain + opp
 

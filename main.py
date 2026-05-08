@@ -147,8 +147,8 @@ def main() -> None:
 
     # Sort by objective (best first) and display
     solutions.sort(key=lambda s: s.objective())
-    for rank, sol in enumerate(solutions, 1):
-        print_solution(sol, rank)
+    """ for rank, sol in enumerate(solutions, 1):
+        print_solution(sol, rank) """
 
     best = solutions[0]
     print(f"\nBest objective: {best.objective():.6f}")
