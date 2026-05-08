@@ -70,7 +70,7 @@ struct Solution {
     static constexpr double NO_SLOT = std::numeric_limits<double>::quiet_NaN();
 
     double survival(int tid) const {
-        return threat_score.at(tid) * survival_rate.at(tid);
+        return survival_rate.at(tid);
     }
 
     double objective() const {

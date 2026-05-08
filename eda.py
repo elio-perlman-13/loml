@@ -415,7 +415,7 @@ def main():
     parser = argparse.ArgumentParser(description="WTA Scenario EDA")
     parser.add_argument("scenario", nargs="?",
                         default="/workspaces/WTA/data/scenario_001.json")
-    parser.add_argument("--out", default="eda.pdf",
+    parser.add_argument("--out", default="eda.png",
                         help="Output file: .pdf saves all figures; .png saves eda_fig1.png etc.")
     args = parser.parse_args()
 

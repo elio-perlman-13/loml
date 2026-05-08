@@ -112,6 +112,13 @@ PROB_TABLE = [
     if score > 0.0   # only store non-zero entries
 ]
 
+# Weapon types that have p_kill > 0 for each target type.
+# Used during generation to guarantee every target is engageable.
+_VALID_WCODES_FOR_TARGET = {
+    tc: [wc for wc, scores in _PROB_MATRIX.items() if scores[ti] > 0]
+    for ti, tc in enumerate(_TGT_CODES)
+}
+
 # ── Target physical properties ─────────────────────────────────────────────────
 # primary: weapons used to place the target in a valid envelope during generation
 TARGET_PROPS = {
@@ -363,6 +370,9 @@ def compute_engagement_window(vessel, winfo, target, t_max=60.0):
             winfo["ElevationMinDeg"] <= el <= winfo["ElevationMaxDeg"]
         )
 
+    # Minimum window width: must fit at least one full burst
+    min_width = winfo["BurstInterval"] + winfo["ReloadTime"]
+
     a = None
     for i in range(len(candidates) - 1):
         mid = (candidates[i] + candidates[i + 1]) / 2.0
@@ -372,10 +382,10 @@ def compute_engagement_window(vessel, winfo, target, t_max=60.0):
             b = candidates[i + 1]
         else:
             if a is not None:
-                if b - a >= 1.0:
+                if b - a >= min_width:
                     return (round(a, 2), round(b, 2))  # first valid window
                 a = None  # too short, keep looking
-    if a is not None and b - a >= 1.0:
+    if a is not None and b - a >= min_width:
         return (round(a, 2), round(b, 2))
 
     return None
@@ -479,11 +489,12 @@ def generate_targets(vessels, target_counts):
                     Speed=round(spd_ms, 2),
                 )
 
-                # ensure at least one weapon/vessel pair can see this target
+                # ensure at least one weapon with p_kill > 0 against this target type
+                # has a window wide enough to fit at least one burst
                 has_window = any(
-                    compute_engagement_window(v, WI[w["WTAWeaponInfoCode"]], candidate) is not None
+                    compute_engagement_window(v, WI[wc], candidate) is not None
                     for v in vessels
-                    for w in [{"WTAWeaponInfoCode": wc} for wc in WI]
+                    for wc in _VALID_WCODES_FOR_TARGET[tcode]
                 )
                 if has_window:
                     break

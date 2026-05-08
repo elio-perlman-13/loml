@@ -73,7 +73,7 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
         double p       = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
         double surv_jp = sol.survival(jp);
         double threat_jp = sol.threat_score.at(jp);
-        opp += surv_jp * (std::pow(1.0 - p, cap_after) - std::pow(1.0 - p, cap_before));
+        opp += surv_jp * threat_jp * (std::pow(1.0 - p, cap_after) - std::pow(1.0 - p, cap_before));
     }
     return opp;  // ≤ 0
 }
@@ -87,7 +87,8 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
 static double score(const Solution& sol, int wid, int tid, double t) {
     uint64_t key = pair_key(wid, tid);
     double   p   = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
-    return sol.survival(tid) * p + opp_cost(sol, wid, tid, t);
+//    return sol.survival(tid) * p + opp_cost(sol, wid, tid, t);
+    return sol.survival(tid) * p * sol.threat_score.at(tid) * sol.threat_score.at(tid);  // opp_cost as a tie-breaker
 }
 
 // ---------------------------------------------------------------------------
