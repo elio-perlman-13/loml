@@ -35,7 +35,7 @@ jobs:
             echo "No scenario_*.json files found in data/"
             exit 1
           fi
-          json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)
+          json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -cs .)
           echo "scenarios=$json" >> "$GITHUB_OUTPUT"
 
   run-scenarios:
