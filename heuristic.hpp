@@ -73,7 +73,7 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
         double p       = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
         double surv_jp = sol.survival(jp);
         double threat_jp = sol.threat_score.at(jp);
-        opp += surv_jp * threat_jp * (std::pow(1.0 - p, cap_after) - std::pow(1.0 - p, cap_before));
+        opp += 1e-2 * surv_jp * threat_jp * (std::pow(1.0 - p, cap_after) - std::pow(1.0 - p, cap_before));
     }
     return opp;  // ≤ 0
 }
@@ -87,7 +87,7 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
 static double score(const Solution& sol, int wid, int tid, double t) {
     uint64_t key = pair_key(wid, tid);
     double   p   = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
-//    return sol.survival(tid) * p + opp_cost(sol, wid, tid, t);
+//    return sol.survival(tid) * p * sol.threat_score.at(tid) + opp_cost(sol, wid, tid, t);
     return sol.survival(tid) * p * sol.threat_score.at(tid);  // opp_cost as a tie-breaker
 }
 
@@ -141,16 +141,70 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
                 best_sc = std::max(best_sc, cs.sc);
         if (best_sc <= 0.0) break;
 
-        // Build RCL
-        struct Pick { int wid, tid; double t; };
-        std::vector<Pick> rcl;
+        // Regret-based weapon choice:
+        //   1) For each weapon, compute best and second-best eligible actions.
+        //   2) Pick weapon by priority = (best-second) + rho*best.
+        //   3) Execute that weapon's best action by main score.
+        constexpr double eps = 1e-12;
+        constexpr double rho = 0.05;
         double threshold = (1.0 - alpha) * best_sc;
-        for (auto& [wid, inner] : cache)
-            for (auto& [tid, cs] : inner)
-                if (cs.sc >= threshold) rcl.push_back({wid, tid, cs.t});
 
-        std::uniform_int_distribution<size_t> dist(0, rcl.size() - 1);
-        auto [chosen_wid, chosen_tid, chosen_t] = rcl[dist(rng)];
+        bool   have_choice = false;
+        int    chosen_wid  = -1;
+        int    chosen_tid  = -1;
+        double chosen_t    = 0.0;
+        double chosen_best = -std::numeric_limits<double>::infinity();
+        double chosen_pri  = -std::numeric_limits<double>::infinity();
+
+        for (auto& [wid, inner] : cache) {
+            int    best_tid = -1;
+            double best_t   = 0.0;
+            double best_sc_w = -std::numeric_limits<double>::infinity();
+            double second_sc = -std::numeric_limits<double>::infinity();
+
+            for (auto& [tid, cs] : inner) {
+                if (cs.sc + eps < threshold) continue;
+
+                if (cs.sc > best_sc_w + eps ||
+                    (std::fabs(cs.sc - best_sc_w) <= eps &&
+                     (sol.threat_score.at(tid) > sol.threat_score.at(best_tid) + eps ||
+                      (std::fabs(sol.threat_score.at(tid) - sol.threat_score.at(best_tid)) <= eps &&
+                       (tid < best_tid || (tid == best_tid && cs.t < best_t)))))) {
+                    second_sc = best_sc_w;
+                    best_sc_w = cs.sc;
+                    best_tid  = tid;
+                    best_t    = cs.t;
+                } else if (cs.sc > second_sc + eps) {
+                    second_sc = cs.sc;
+                }
+            }
+
+            if (best_tid < 0) continue;
+            if (!std::isfinite(second_sc)) second_sc = 0.0;
+
+            double regret = best_sc_w - second_sc;
+            double priority = regret + rho * best_sc_w;
+
+            if (!have_choice ||
+                priority > chosen_pri + eps ||
+                (std::fabs(priority - chosen_pri) <= eps &&
+                 (best_sc_w > chosen_best + eps ||
+                  (std::fabs(best_sc_w - chosen_best) <= eps &&
+                   (sol.threat_score.at(best_tid) > sol.threat_score.at(chosen_tid) + eps ||
+                    (std::fabs(sol.threat_score.at(best_tid) - sol.threat_score.at(chosen_tid)) <= eps &&
+                     (wid < chosen_wid ||
+                      (wid == chosen_wid && (best_tid < chosen_tid ||
+                       (best_tid == chosen_tid && best_t < chosen_t)))))))))) {
+                have_choice = true;
+                chosen_wid  = wid;
+                chosen_tid  = best_tid;
+                chosen_t    = best_t;
+                chosen_best = best_sc_w;
+                chosen_pri  = priority;
+            }
+        }
+
+        if (!have_choice) break;
 
         // Dirty weapons before state mutates
         std::vector<int> dirty = {chosen_wid};
@@ -188,7 +242,7 @@ Solution grasp(
     const std::unordered_map<int, int>&     vessel_id_map,
     double horizon,
     double alpha    = 0.15,
-    int    restarts = 10,
+    int    restarts = 1,
     uint32_t seed   = 42)
 {
     std::mt19937 rng(seed);
