@@ -88,7 +88,7 @@ static double score(const Solution& sol, int wid, int tid, double t) {
     uint64_t key = pair_key(wid, tid);
     double   p   = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
 //    return sol.survival(tid) * p + opp_cost(sol, wid, tid, t);
-    return sol.survival(tid) * p * sol.threat_score.at(tid) * sol.threat_score.at(tid);  // opp_cost as a tie-breaker
+    return sol.survival(tid) * p * sol.threat_score.at(tid);  // opp_cost as a tie-breaker
 }
 
 // ---------------------------------------------------------------------------
