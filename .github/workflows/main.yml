@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 256
       matrix:
         scenario: ${{ fromJson(needs.prepare-matrix.outputs.scenarios) }}
     steps:
@@ -76,6 +77,7 @@ jobs:
           ./wta_solver "$SCENARIO" --restarts "$RESTARTS" --alpha "$ALPHA" --seed "$SEED" | tee "$log"
 
           scenario_name="$(basename "$SCENARIO")"
+          initial_threat=$(jq '[.assignment_request.targets[].ThreatScore] | add // 0' "$SCENARIO")
           best=$(grep -E 'restart[[:space:]]+[0-9]+/[0-9]+[[:space:]]+obj=' "$log" | sed -E 's/.*obj=([0-9.]+).*/\1/' | sort -g | head -n1)
           mean=$(grep -E 'restart[[:space:]]+[0-9]+/[0-9]+[[:space:]]+obj=' "$log" | sed -E 's/.*obj=([0-9.]+).*/\1/' | awk '{s+=$1; n+=1} END {if(n>0) printf "%.6f", s/n; else print "nan"}')
           elapsed=$(grep -E '^Completed in ' "$log" | tail -n1 | sed -E 's/^Completed in ([0-9.]+)s$/\1/')
@@ -84,8 +86,8 @@ jobs:
           mkdir -p metrics
           csv="metrics/${scenario_name%.json}.csv"
           {
-            echo "scenario,best,mean,avg_time_per_run_s,restarts,alpha,seed"
-            echo "$scenario_name,$best,$mean,$avg_time,$RESTARTS,$ALPHA,$SEED"
+            echo "scenario,initial_threat,best,mean,avg_time_per_run_s,restarts,alpha,seed"
+            echo "$scenario_name,$initial_threat,$best,$mean,$avg_time,$RESTARTS,$ALPHA,$SEED"
           } > "$csv"
 
       - name: Upload per-scenario metrics
@@ -110,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           out="grasp_metrics_all_scenarios.csv"
-          echo "scenario,best,mean,avg_time_per_run_s,restarts,alpha,seed" > "$out"
+          echo "scenario,initial_threat,best,mean,avg_time_per_run_s,restarts,alpha,seed" > "$out"
           find artifacts -type f -name '*.csv' | sort | while read -r f; do
             tail -n +2 "$f" >> "$out"
           done
