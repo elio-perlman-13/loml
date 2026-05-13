@@ -96,7 +96,9 @@ static double score(const Solution& sol, int wid, int tid, double t,
     (void)t; (void)wid; (void)exclusive_cnt; (void)remain_slot;
     // Prioritise targets with the highest remaining survival (least-killed first).
     // p_ij and threat_score influence weapon selection via regret, not the per-pair score.
-    return sol.survival(tid);
+    double threat = sol.threat_score.at(tid);
+    double surv   = sol.survival(tid);
+    return threat * surv;
 }
 
 // ---------------------------------------------------------------------------
