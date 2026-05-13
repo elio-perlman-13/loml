@@ -78,56 +78,25 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
     return opp;  // ≤ 0
 }
 
-struct TailRiskState {
-    double lambda = 0.0;
-    double cutoff = 0.0;
-};
-
-static TailRiskState compute_tail_risk_state(const Solution& sol) {
-    constexpr std::size_t top_k = 5;
-
-    TailRiskState state;
-    if (sol.threat_score.empty()) return state;
-
-    std::vector<double> residuals;
-    residuals.reserve(sol.threat_score.size());
-    double mean_residual = 0.0;
-    for (auto& [tid, _] : sol.threat_score) {
-        double residual = sol.residual_threat(tid);
-        residuals.push_back(residual);
-        mean_residual += residual;
-    }
-    mean_residual /= static_cast<double>(residuals.size());
-
-    std::sort(residuals.begin(), residuals.end(), std::greater<double>());
-    std::size_t use_k = std::min(top_k, residuals.size());
-    double top_sum = 0.0;
-    for (std::size_t i = 0; i < use_k; ++i) top_sum += residuals[i];
-
-    double avg_top = top_sum / static_cast<double>(use_k);
-    state.cutoff = residuals[use_k - 1];
-    if (mean_residual > 0.0) {
-        state.lambda = std::min(1.0, std::max(0.0, avg_top / mean_residual - 1.0));
-    }
-    return state;
-}
-
 // ---------------------------------------------------------------------------
-// score — approximate rollout score for candidate (wid, tid, t)
-//   score = gain + opp_cost
-//   gain     = survival[j] * p_ij          (direct threat reduction, > 0)
-//   opp_cost = Σ_{j'≠j} survival[j'] * ((1-p)^cap_after - (1-p)^cap_before)  (≥ 0 when capacity lost)
+// score — scoring formula for candidate (wid, tid, t)
+//
+//   score(i,j,t) = w(j) * s(j) * p(ij)  -  beta * exclusive(i) / remain_slot(i)
+//
+//   w(j)          = threat score of target j
+//   s(j)          = current survival rate of target j
+//   p(ij)         = kill probability of weapon i vs target j
+//   exclusive(i)  = # targets in weapon_targets[i] that no other weapon can cover
+//   remain_slot(i)= min(remaining_ammo[i], Σ_j cap[(i,j)]) — binding capacity
+//   beta          = penalty weight (scarcity of weapon i penalises high-gain actions
+//                    only when weapon is the sole option for many targets)
 // ---------------------------------------------------------------------------
-static double score(const Solution& sol, const TailRiskState& tail_state, int wid, int tid, double t) {
-    uint64_t key = pair_key(wid, tid);
-    double   p   = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
-    double residual_before = sol.residual_threat(tid);
-    double residual_after  = residual_before * (1.0 - p);
-    double delta_mean      = residual_before - residual_after;
-    double delta_tail      = std::max(residual_before - tail_state.cutoff, 0.0)
-                           - std::max(residual_after  - tail_state.cutoff, 0.0);
-//    return delta_mean + tail_state.lambda * delta_tail + opp_cost(sol, wid, tid, t);
-    return delta_mean + tail_state.lambda * delta_tail;
+static double score(const Solution& sol, int wid, int tid, double t,
+                    int exclusive_cnt, int remain_slot) {
+    (void)t; (void)wid; (void)exclusive_cnt; (void)remain_slot;
+    // Prioritise targets with the highest remaining survival (least-killed first).
+    // p_ij and threat_score influence weapon selection via regret, not the per-pair score.
+    return sol.survival(tid);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,19 +127,37 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         uint64_t key    = pair_key(wid, tid);
         auto     cap_it = sol.cap.find(key);
         if (cap_it == sol.cap.end()) return;
-        if (sol.remaining_ammo.at(wid) <= 0) return;
+        int ammo = sol.remaining_ammo.at(wid);
+        if (ammo <= 0) return;
         int k_val = 0;
         if (auto ki = sol.k.find(key); ki != sol.k.end()) k_val = ki->second;
         if (k_val >= sol.max_shots->at(wid)) return;
         double t = sol.first_slot(wid, tid);
         if (std::isnan(t)) return;
-        cache[wid][tid] = {t, 0.0};
-    };
 
-    auto refresh_scores = [&](const TailRiskState& tail_state) {
-        for (auto& [wid, inner] : cache)
-            for (auto& [tid, cs] : inner)
-                cs.sc = score(sol, tail_state, wid, tid, cs.t);
+        // exclusive(wid): targets covered exclusively by this weapon
+        int excl = 0;
+        auto wt_it = sol.weapon_targets.find(wid);
+        if (wt_it != sol.weapon_targets.end()) {
+            for (int j : wt_it->second) {
+                auto tw_it = target_weapons.find(j);
+                if (tw_it != target_weapons.end() && tw_it->second.size() == 1)
+                    ++excl;
+            }
+        }
+
+        // remain_slot(wid) = min(ammo, total cap across all targets)
+        int total_cap = 0;
+        if (wt_it != sol.weapon_targets.end()) {
+            for (int j : wt_it->second) {
+                auto ci = sol.cap.find(pair_key(wid, j));
+                if (ci != sol.cap.end() && ci->second > 0)
+                    total_cap += ci->second;
+            }
+        }
+        int remain_slot = std::min(ammo, total_cap);
+
+        cache[wid][tid] = {t, score(sol, wid, tid, t, excl, remain_slot)};
     };
 
     // Initial full scoring
@@ -178,11 +165,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         for (int tid : tgts)
             try_score(wid, tid);
 
-    refresh_scores(compute_tail_risk_state(sol));
-
     while (!cache.empty()) {
-        refresh_scores(compute_tail_risk_state(sol));
-
         // Find best score — O(live pairs), fast linear scan in C++
         double best_sc = -std::numeric_limits<double>::infinity();
         for (auto& [wid, inner] : cache)

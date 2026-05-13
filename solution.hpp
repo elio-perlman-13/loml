@@ -80,32 +80,6 @@ struct Solution {
         return obj;
     }
 
-    double residual_threat(int tid) const {
-        return threat_score.at(tid) * survival_rate.at(tid);
-    }
-
-    double max_residual_threat() const {
-        double best = 0.0;
-        for (auto& [tid, w] : threat_score)
-            best = std::max(best, w * survival_rate.at(tid));
-        return best;
-    }
-
-    double avg_top_k_residual(std::size_t k) const {
-        if (k == 0 || threat_score.empty()) return 0.0;
-
-        std::vector<double> residuals;
-        residuals.reserve(threat_score.size());
-        for (auto& [tid, w] : threat_score)
-            residuals.push_back(w * survival_rate.at(tid));
-
-        std::sort(residuals.begin(), residuals.end(), std::greater<double>());
-        std::size_t use_k = std::min(k, residuals.size());
-        double sum = 0.0;
-        for (std::size_t i = 0; i < use_k; ++i) sum += residuals[i];
-        return sum / static_cast<double>(use_k);
-    }
-
     double first_slot(int wid, int tid) const {
         auto it = first_slot_cache.find(pair_key(wid, tid));
         return it != first_slot_cache.end() ? it->second : NO_SLOT;
