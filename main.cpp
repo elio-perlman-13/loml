@@ -21,6 +21,8 @@
 
 using json = nlohmann::json;
 
+static constexpr std::size_t REPORT_TOP_K = 5;
+
 // ---------------------------------------------------------------------------
 // Scenario — owns all static tables; Solution holds const pointers into them
 // ---------------------------------------------------------------------------
@@ -222,7 +224,7 @@ static void print_solution(const Solution& sol, int rank) {
 int main(int argc, char* argv[]) {
     std::string scenario_path = "/workspaces/WTA/data/scenario_001.json";
     std::string output_path;
-    int    restarts = 10;
+    int    restarts = 1;
     double alpha    = 0.15;
     uint32_t seed   = 42;
 
@@ -264,8 +266,12 @@ int main(int argc, char* argv[]) {
             sc.burst_dur, sc.max_shots, sc.vessel_id_map, sc.horizon);
         grasp_construction(sol, alpha, rng);
         double obj = sol.objective();
+        double max_res = sol.max_residual_threat();
+        double avg_top_k = sol.avg_top_k_residual(REPORT_TOP_K);
         std::cout << "  restart " << std::setw(3) << (r + 1) << "/" << restarts
-                  << "  obj=" << std::fixed << std::setprecision(6) << obj << "\n";
+                  << "  obj=" << std::fixed << std::setprecision(6) << obj
+                  << "  max_res=" << max_res
+                  << "  avg_top" << REPORT_TOP_K << "=" << avg_top_k << "\n";
         solutions.push_back(std::move(sol));
     }
     auto t1 = std::chrono::steady_clock::now();
@@ -280,10 +286,15 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nBest objective: " << std::fixed << std::setprecision(6)
               << solutions[0].objective() << "\n";
+    std::cout << "Best max residual: " << std::fixed << std::setprecision(6)
+              << solutions[0].max_residual_threat() << "\n";
+    std::cout << "Best avg top-" << REPORT_TOP_K << " residual: "
+              << std::fixed << std::setprecision(6)
+              << solutions[0].avg_top_k_residual(REPORT_TOP_K) << "\n";
 
     write_solution(solutions[0], output_path);
     return 0;
 }
 
 // Run: g++ -std=c++17 -O3 -march=native -I/opt/conda/include -o wta_solver main.cpp && ./wta_solver [scenario.json] [--restarts N] [--alpha A] [--seed S]
-// Check && plot: python check_solution.py data/scenario_005.json /workspaces/WTA/data/scenario_005_solution.json && python plot.py data/scenario_005.json /workspaces/WTA/data/scenario_005_solution.json --out plot.png
+// Check && plot: python check_solution.py data/scenario_032.json /workspaces/WTA/data/scenario_032_solution.json && python plot.py data/scenario_032.json /workspaces/WTA/data/scenario_032_solution.json --out plot.png

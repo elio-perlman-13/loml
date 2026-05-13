@@ -78,17 +78,56 @@ static double opp_cost(const Solution& sol, int wid, int tid, double t) {
     return opp;  // ≤ 0
 }
 
+struct TailRiskState {
+    double lambda = 0.0;
+    double cutoff = 0.0;
+};
+
+static TailRiskState compute_tail_risk_state(const Solution& sol) {
+    constexpr std::size_t top_k = 5;
+
+    TailRiskState state;
+    if (sol.threat_score.empty()) return state;
+
+    std::vector<double> residuals;
+    residuals.reserve(sol.threat_score.size());
+    double mean_residual = 0.0;
+    for (auto& [tid, _] : sol.threat_score) {
+        double residual = sol.residual_threat(tid);
+        residuals.push_back(residual);
+        mean_residual += residual;
+    }
+    mean_residual /= static_cast<double>(residuals.size());
+
+    std::sort(residuals.begin(), residuals.end(), std::greater<double>());
+    std::size_t use_k = std::min(top_k, residuals.size());
+    double top_sum = 0.0;
+    for (std::size_t i = 0; i < use_k; ++i) top_sum += residuals[i];
+
+    double avg_top = top_sum / static_cast<double>(use_k);
+    state.cutoff = residuals[use_k - 1];
+    if (mean_residual > 0.0) {
+        state.lambda = std::min(1.0, std::max(0.0, avg_top / mean_residual - 1.0));
+    }
+    return state;
+}
+
 // ---------------------------------------------------------------------------
 // score — approximate rollout score for candidate (wid, tid, t)
 //   score = gain + opp_cost
 //   gain     = survival[j] * p_ij          (direct threat reduction, > 0)
 //   opp_cost = Σ_{j'≠j} survival[j'] * ((1-p)^cap_after - (1-p)^cap_before)  (≥ 0 when capacity lost)
 // ---------------------------------------------------------------------------
-static double score(const Solution& sol, int wid, int tid, double t) {
+static double score(const Solution& sol, const TailRiskState& tail_state, int wid, int tid, double t) {
     uint64_t key = pair_key(wid, tid);
     double   p   = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
-//    return sol.survival(tid) * p * sol.threat_score.at(tid) + opp_cost(sol, wid, tid, t);
-    return sol.survival(tid) * p * sol.threat_score.at(tid);  // opp_cost as a tie-breaker
+    double residual_before = sol.residual_threat(tid);
+    double residual_after  = residual_before * (1.0 - p);
+    double delta_mean      = residual_before - residual_after;
+    double delta_tail      = std::max(residual_before - tail_state.cutoff, 0.0)
+                           - std::max(residual_after  - tail_state.cutoff, 0.0);
+//    return delta_mean + tail_state.lambda * delta_tail + opp_cost(sol, wid, tid, t);
+    return delta_mean + tail_state.lambda * delta_tail;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +164,13 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         if (k_val >= sol.max_shots->at(wid)) return;
         double t = sol.first_slot(wid, tid);
         if (std::isnan(t)) return;
-        cache[wid][tid] = {t, score(sol, wid, tid, t)};
+        cache[wid][tid] = {t, 0.0};
+    };
+
+    auto refresh_scores = [&](const TailRiskState& tail_state) {
+        for (auto& [wid, inner] : cache)
+            for (auto& [tid, cs] : inner)
+                cs.sc = score(sol, tail_state, wid, tid, cs.t);
     };
 
     // Initial full scoring
@@ -133,7 +178,11 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         for (int tid : tgts)
             try_score(wid, tid);
 
+    refresh_scores(compute_tail_risk_state(sol));
+
     while (!cache.empty()) {
+        refresh_scores(compute_tail_risk_state(sol));
+
         // Find best score — O(live pairs), fast linear scan in C++
         double best_sc = -std::numeric_limits<double>::infinity();
         for (auto& [wid, inner] : cache)
@@ -157,6 +206,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         double chosen_pri  = -std::numeric_limits<double>::infinity();
 
         for (auto& [wid, inner] : cache) {
+
             int    best_tid = -1;
             double best_t   = 0.0;
             double best_sc_w = -std::numeric_limits<double>::infinity();
