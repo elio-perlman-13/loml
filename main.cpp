@@ -285,5 +285,5 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-// Run: g++ -std=c++17 -O3 -march=native -I/opt/conda/include -o wta_solver main.cpp && ./wta_solver [scenario.json] [--restarts N] [--alpha A] [--seed S]
-// Check && plot: python check_solution.py data/scenario_032.json /workspaces/WTA/data/scenario_032_solution.json && python plot.py data/scenario_032.json /workspaces/WTA/data/scenario_032_solution.json --out plot.png
+// Run: g++ -std=c++17 -O3 -march=native -I/opt/conda/include -o wta_solver main.cpp && ./wta_solver data/scenario_011.json [scenario.json] [--restarts N] [--alpha A] [--seed S]
+// Check && plot: python check_solution.py data/scenario_045.json /workspaces/WTA/data/scenario_045_solution.json && python plot.py data/scenario_045.json /workspaces/WTA/data/scenario_045_solution.json --out plot.png

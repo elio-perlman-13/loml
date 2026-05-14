@@ -18,87 +18,12 @@ static inline int slots_overlap(double a, double b, double s, double e, double d
 }
 
 // ---------------------------------------------------------------------------
-// opp_cost — opportunity cost (≤ 0) of committing (wid, tid) at time t
-//
-// Only the covering interval (fs, fe) changes.  For each other live target j':
-//   before = slots in [a_j', b_j'] ∩ (fs, fe)
-//   after  = slots in [a_j', b_j'] ∩ (fs, t) + slots in [a_j', b_j'] ∩ (t+d, fe)
-//   delta  = after - before  (≤ 0)
-//   cap_after = cap_before + delta   (clamped to effective ammo/max_shots limits)
-// ---------------------------------------------------------------------------
-static double opp_cost(const Solution& sol, int wid, int tid, double t) {
-    double         d    = sol.burst_dur->at(wid);
-    const auto&    fv   = sol.free.at(wid);
-    double         end  = t + d;
-    int            ammo = sol.remaining_ammo.at(wid);
-    int            M    = sol.max_shots->at(wid);
-
-    // find covering interval via upper_bound then step back
-    auto it = std::upper_bound(fv.begin(), fv.end(),
-        Interval{t, std::numeric_limits<double>::infinity()},
-        [](const Interval& val, const Interval& iv){ return val.s < iv.s; });
-    if (it != fv.begin()) --it;
-    double fs = it->s, fe = it->e;
-
-    double opp = 0.0;
-    auto   tgts_it = sol.weapon_targets.find(wid);
-    if (tgts_it == sol.weapon_targets.end()) return 0.0;
-
-    for (int jp : tgts_it->second) {
-        if (jp == tid) continue;
-        uint64_t key = pair_key(wid, jp);
-
-        auto cap_it = sol.cap.find(key);
-        if (cap_it == sol.cap.end() || cap_it->second <= 0) continue;
-        if (ammo <= 1) continue;
-        int k_jp = 0;
-        if (auto ki = sol.k.find(key); ki != sol.k.end()) k_jp = ki->second;
-        if (k_jp >= M) continue;
-
-        auto [a, b] = sol.windows->at(key);
-        int before = slots_overlap(a, b, fs, fe, d);
-        if (before == 0) continue;
-
-        int after = slots_overlap(a, b, fs,  t,  d)
-                  + slots_overlap(a, b, end, fe,  d);
-        int delta = after - before;
-        if (delta == 0) continue;
-
-        int cap_before = std::min({cap_it->second, ammo,     M - k_jp});
-        if (cap_before <= 0) continue;
-        int cap_after  = std::min({cap_it->second + delta, ammo - 1, M - k_jp - 1});
-        cap_after      = std::max(cap_after, 0);
-        if (cap_after >= cap_before) continue;
-
-        double p       = sol.p_ij->count(key) ? sol.p_ij->at(key) : 0.0;
-        double surv_jp = sol.survival(jp);
-        double threat_jp = sol.threat_score.at(jp);
-        opp += 1e-2 * surv_jp * threat_jp * (std::pow(1.0 - p, cap_after) - std::pow(1.0 - p, cap_before));
-    }
-    return opp;  // ≤ 0
-}
-
-// ---------------------------------------------------------------------------
-// score — scoring formula for candidate (wid, tid, t)
-//
-//   score(i,j,t) = w(j) * s(j) * p(ij)  -  beta * exclusive(i) / remain_slot(i)
-//
-//   w(j)          = threat score of target j
-//   s(j)          = current survival rate of target j
-//   p(ij)         = kill probability of weapon i vs target j
-//   exclusive(i)  = # targets in weapon_targets[i] that no other weapon can cover
-//   remain_slot(i)= min(remaining_ammo[i], Σ_j cap[(i,j)]) — binding capacity
-//   beta          = penalty weight (scarcity of weapon i penalises high-gain actions
-//                    only when weapon is the sole option for many targets)
+// score — pair score used only to rank targets for a chosen weapon
 // ---------------------------------------------------------------------------
 static double score(const Solution& sol, int wid, int tid, double t,
-                    int exclusive_cnt, int remain_slot) {
-    (void)t; (void)wid; (void)exclusive_cnt; (void)remain_slot;
-    // Prioritise targets with the highest remaining survival (least-killed first).
-    // p_ij and threat_score influence weapon selection via regret, not the per-pair score.
-    double threat = sol.threat_score.at(tid);
-    double surv   = sol.survival(tid);
-    return threat * surv;
+                    int exclusive_cnt) {
+    (void)t; (void)wid; (void)exclusive_cnt;
+    return sol.survival(tid);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,18 +73,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
             }
         }
 
-        // remain_slot(wid) = min(ammo, total cap across all targets)
-        int total_cap = 0;
-        if (wt_it != sol.weapon_targets.end()) {
-            for (int j : wt_it->second) {
-                auto ci = sol.cap.find(pair_key(wid, j));
-                if (ci != sol.cap.end() && ci->second > 0)
-                    total_cap += ci->second;
-            }
-        }
-        int remain_slot = std::min(ammo, total_cap);
-
-        cache[wid][tid] = {t, score(sol, wid, tid, t, excl, remain_slot)};
+        cache[wid][tid] = {t, score(sol, wid, tid, t, excl)};
     };
 
     // Initial full scoring
@@ -191,9 +105,8 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         double chosen_pri  = -std::numeric_limits<double>::infinity();
 
         for (auto& [wid, inner] : cache) {
-
-            int    best_tid = -1;
-            double best_t   = 0.0;
+            int    best_tid  = -1;
+            double best_t    = 0.0;
             double best_sc_w = -std::numeric_limits<double>::infinity();
             double second_sc = -std::numeric_limits<double>::infinity();
 
@@ -225,7 +138,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
                 (std::fabs(priority - chosen_pri) <= eps &&
                  (best_sc_w > chosen_best + eps ||
                   (std::fabs(best_sc_w - chosen_best) <= eps &&
-                   (sol.threat_score.at(best_tid) > sol.threat_score.at(chosen_tid) + eps ||
+                    (sol.threat_score.at(best_tid) > sol.threat_score.at(chosen_tid) + eps ||
                     (std::fabs(sol.threat_score.at(best_tid) - sol.threat_score.at(chosen_tid)) <= eps &&
                      (wid < chosen_wid ||
                       (wid == chosen_wid && (best_tid < chosen_tid ||
