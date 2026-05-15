@@ -255,4 +255,4 @@ int main(int argc, char* argv[]) {
 }
 
 // Run:
-// g++ -std=c++17 -O3 -march=native -I/opt/conda/include -o wta_solver_hh main_hh.cpp && ./wta_solver_hh data/scenario_011.json
+// g++ -std=c++17 -O3 -march=native -I/opt/conda/include -o wta_solver_hh main_hh.cpp && ./wta_solver_hh data/scenario_050.json

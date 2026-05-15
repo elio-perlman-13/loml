@@ -19,6 +19,12 @@ random.seed(42)
 M2KM = 1e-3
 KM2M = 1e3
 
+# ── Scenario-level controls ───────────────────────────────────────────────────
+SCENARIO_HORIZON_S = 20.0
+VESSEL_SPEED_KMH_MIN = 60.0
+VESSEL_SPEED_KMH_MAX = 70.0
+AMMO_BUDGET_FACTOR = 0.35
+
 # ── Weapon Info Catalog ────────────────────────────────────────────────────────
 #  Type 1 = SAM (Tên lửa phòng không)
 #  Type 2 = Cannon/CIWS (Pháo)
@@ -61,7 +67,7 @@ WEAPON_INFOS = [
          MinRange=0,      MaxRange=20_000, MinAltitude=0,   MaxAltitude=8_000,
          AzimuthFromDeg=0, AzimuthToDeg=360,
          ElevationMinDeg=0,  ElevationMaxDeg=90,
-         MaxShotsPerTarget=6, RoundsPerBurst=1, BurstInterval=2.0, ReloadTime=12.0),
+         MaxShotsPerTarget=6, RoundsPerBurst=1, BurstInterval=2.0, ReloadTime=5.0),
 
     # ── Tên lửa VCM – anti-ship only, 10–300 km, 360°
     # 2 bệ × 4 ống/bệ = 8 rounds
@@ -69,7 +75,7 @@ WEAPON_INFOS = [
          MinRange=10_000, MaxRange=300_000, MinAltitude=-5, MaxAltitude=50,
          AzimuthFromDeg=0, AzimuthToDeg=360,
          ElevationMinDeg=-2, ElevationMaxDeg=10,
-         MaxShotsPerTarget=2, RoundsPerBurst=1, BurstInterval=8.0, ReloadTime=30.0),
+         MaxShotsPerTarget=2, RoundsPerBurst=1, BurstInterval=5.0, ReloadTime=5.0),
 ]
 WI = {w["Code"]: w for w in WEAPON_INFOS}
 
@@ -198,8 +204,12 @@ def randomize_scenario_params(n_targets: int = 100, n_weapons_per_vessel: int = 
 
     ammo_range = {}
     for k, (lo_min, lo_max, hi_min, hi_max) in _AMMO_BOUNDS.items():
-        lo = random.randint(lo_min, lo_max)
-        hi = random.randint(max(lo + 1, hi_min), hi_max)
+        lo_raw = random.randint(lo_min, lo_max)
+        hi_raw = random.randint(max(lo_raw + 1, hi_min), hi_max)
+
+        # Reduce inventory so the solver cannot simply expend all available rounds.
+        lo = max(1, int(round(lo_raw * AMMO_BUDGET_FACTOR)))
+        hi = max(lo + 1, int(round(hi_raw * AMMO_BUDGET_FACTOR)))
         ammo_range[k] = (lo, hi)
 
     return target_counts, weapon_dist, ammo_range
@@ -231,8 +241,10 @@ def alt_compatible(winfo, alt_km):
 # ── Threat proximity filter ───────────────────────────────────────────────────
 # A target is "proximity-threatening" to a vessel only if its predicted
 # straight-line trajectory passes within this radius (km).
-# ~3 km ≈ inner defensive bubble / CIWS effective range.
-THREAT_RADIUS_KM = 3.0
+# 500m radius defensive bubble.
+THREAT_RADIUS_KM = 0.5
+
+# Engagement window only needs to fit one burst interval.
 
 def min_approach_km(target, vessel):
     """Minimum distance (km) between target's straight-line trajectory and vessel."""
@@ -257,7 +269,7 @@ def min_approach_km(target, vessel):
 
 # ── Engagement window (computed from trajectory) ───────────────────────────────
 
-def compute_engagement_window(vessel, winfo, target, t_max=60.0):
+def compute_engagement_window(vessel, winfo, target, t_max=SCENARIO_HORIZON_S):
     """
     Analytically find [a_ij, b_ij] in seconds.
 
@@ -370,8 +382,8 @@ def compute_engagement_window(vessel, winfo, target, t_max=60.0):
             winfo["ElevationMinDeg"] <= el <= winfo["ElevationMaxDeg"]
         )
 
-    # Minimum window width: must fit at least one full burst
-    min_width = winfo["BurstInterval"] + winfo["ReloadTime"]
+    # Minimum window width only needs to fit one burst interval.
+    min_width = winfo["BurstInterval"]
 
     a = None
     for i in range(len(candidates) - 1):
@@ -408,7 +420,8 @@ def generate_vessels():
     # Vessel 2 is ~0.55 km NNE of vessel 1.
     vessels = []
     for vid, x, y in [(1, 0.0, 0.0), (2, 0.3, 0.45)]:
-        spd_ms = random.uniform(3.0, 8.0)          # m/s
+        spd_kmh = random.uniform(VESSEL_SPEED_KMH_MIN, VESSEL_SPEED_KMH_MAX)
+        spd_ms = spd_kmh / 3.6                     # m/s (randomized 60-70 km/h)
         spd_km = round(spd_ms * M2KM, 5)           # km/s
         az     = random.uniform(0, 360)
         hx, hy, _ = _heading_vec(az)               # ships stay on surface: hz=0
@@ -444,9 +457,11 @@ def generate_targets(vessels, target_counts):
     for tcode, count in target_counts.items():
         props = TARGET_PROPS[tcode]
         for _ in range(count):
+            accepted = False
+            miss_km = 0.0
             # Resample until the target has at least one valid engagement window
             # with some weapon on some vessel (guards against rare envelope misses)
-            for _attempt in range(50):
+            for _attempt in range(5000):
                 spd_ms  = random.uniform(*props["speed"])        # m/s
                 spd_km  = spd_ms * M2KM                          # km/s
                 alt_m   = random.uniform(*props["alt"])          # metres
@@ -468,12 +483,10 @@ def generate_targets(vessels, target_counts):
                 az = random_az_in_sector(winfo["AzimuthFromDeg"], winfo["AzimuthToDeg"])
                 x0, y0 = place_at_km(vessel["X"], vessel["Y"], initial_range_km, az)
 
-                # heading toward vessel with miss distance encoded at generation time:
-                #   80 % near-pass: miss < 3 km
-                #   20 % far-pass:  miss > 3 km
+                # heading toward vessel with miss distance constrained inside the
+                # scenario threat radius so each accepted target is genuinely relevant.
                 hdg_to_vessel = bearing_to_km(x0, y0, vessel["X"], vessel["Y"])
-                near_pass = random.random() < 0.80
-                miss_km   = random.uniform(0.1, 2.5) if near_pass else random.uniform(3.5, 8.0)
+                miss_km = random.uniform(0.02, max(0.03, THREAT_RADIUS_KM * 0.95))
                 deflect   = math.degrees(math.asin(min(miss_km / initial_range_km, 1.0)))
                 hdg       = (hdg_to_vessel + random.choice([-1, 1]) * deflect) % 360
 
@@ -490,14 +503,87 @@ def generate_targets(vessels, target_counts):
                 )
 
                 # ensure at least one weapon with p_kill > 0 against this target type
-                # has a window wide enough to fit at least one burst
+                # has a burst-feasible window and passes the same proximity filter
+                # used later when exporting engagement_windows.
                 has_window = any(
-                    compute_engagement_window(v, WI[wc], candidate) is not None
+                    min_approach_km(candidate, v) <= THREAT_RADIUS_KM and
+                    compute_engagement_window(v, WI[wc], candidate, t_max=SCENARIO_HORIZON_S) is not None
                     for v in vessels
                     for wc in _VALID_WCODES_FOR_TARGET[tcode]
                 )
                 if has_window:
+                    accepted = True
                     break
+
+            if not accepted:
+                # Deterministic fallback: construct a direct-inbound trajectory
+                # for a valid weapon/ship combination to guarantee feasibility.
+                fallback_speed_ms = props["speed"][1]
+                fallback_pitch = 0.0
+                for v in vessels:
+                    if accepted:
+                        break
+                    for wc in _VALID_WCODES_FOR_TARGET[tcode]:
+                        winfo = WI[wc]
+                        alt_lo_m = max(props["alt"][0], winfo["MinAltitude"])
+                        alt_hi_m = min(props["alt"][1], winfo["MaxAltitude"])
+                        if alt_lo_m > alt_hi_m:
+                            continue
+                        alt_m = 0.5 * (alt_lo_m + alt_hi_m)
+                        alt_km = alt_m * M2KM
+                        fallback_pitch = 0.0 if alt_km <= 0.01 else fallback_pitch
+
+                        az_from = winfo["AzimuthFromDeg"]
+                        az_to = winfo["AzimuthToDeg"]
+                        if az_from <= az_to:
+                            az_mid = 0.5 * (az_from + az_to)
+                        else:
+                            span = (az_to + 360.0) - az_from
+                            az_mid = (az_from + 0.5 * span) % 360.0
+
+                        az_samples = [
+                            az_from,
+                            az_mid,
+                            az_to,
+                            random_az_in_sector(winfo["AzimuthFromDeg"], winfo["AzimuthToDeg"]),
+                        ]
+                        for az in az_samples:
+                            r_min_km = winfo["MinRange"] * M2KM
+                            r_max_km = winfo["MaxRange"] * M2KM
+                            if r_max_km <= r_min_km + 0.02:
+                                continue
+                            initial_range_km = r_min_km + 0.25 * (r_max_km - r_min_km)
+                            x0, y0 = place_at_km(v["X"], v["Y"], initial_range_km, az)
+                            hdg_to_vessel = bearing_to_km(x0, y0, v["X"], v["Y"])
+                            hx, hy, hz = _heading_vec(hdg_to_vessel, fallback_pitch)
+
+                            fallback_candidate = dict(
+                                ID=tgt_id,
+                                WTATargetInfoCode=tcode,
+                                X=x0, Y=y0, Z=round(alt_km, 4),
+                                VX=hx, VY=hy, VZ=hz,
+                                Speed=round(fallback_speed_ms, 2),
+                            )
+
+                            if min_approach_km(fallback_candidate, v) > THREAT_RADIUS_KM:
+                                continue
+                            if compute_engagement_window(v, winfo, fallback_candidate, t_max=SCENARIO_HORIZON_S) is None:
+                                continue
+
+                            candidate = fallback_candidate
+                            miss_km = min_approach_km(candidate, v)
+                            accepted = True
+                            break
+
+                        if accepted:
+                            break
+
+            if not accepted:
+                raise RuntimeError(
+                    f"Failed to sample feasible target for {tcode} under radius={THREAT_RADIUS_KM} km "
+                    f"and horizon={SCENARIO_HORIZON_S}s"
+                )
+
             # compute ThreatScore after accepted sample
             _D_REF    = 8.0
             proximity = max(0.0, 1.0 - miss_km / _D_REF)
@@ -553,7 +639,9 @@ def main():
             winfo  = wpn_info_by_id[wpn["ID"]]
             vessel = vessel_by_id[wpn["WTAVesselID"]]
             for tgt in targets:
-                win = compute_engagement_window(vessel, winfo, tgt)
+                if min_approach_km(tgt, vessel) > THREAT_RADIUS_KM:
+                    continue
+                win = compute_engagement_window(vessel, winfo, tgt, t_max=SCENARIO_HORIZON_S)
                 if win is not None:
                     windows[f"{wpn['ID']}_{tgt['ID']}"] = win
                     covered.add(tgt["ID"])

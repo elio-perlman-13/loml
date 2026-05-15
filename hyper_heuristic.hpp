@@ -2,6 +2,7 @@
 #include "portfolio.hpp"
 #include "solution.hpp"
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <random>
@@ -23,8 +24,10 @@ static inline int slots_overlap(double a, double b, double s, double e, double d
 // ---------------------------------------------------------------------------
 static double score(const Solution& sol, int wid, int tid, double t,
                     int exclusive_cnt) {
-    (void)t; (void)wid; (void)exclusive_cnt;
-    return sol.survival(tid);
+    (void)t;
+    (void)exclusive_cnt;
+    double p = sol.p_ij->count(pair_key(wid, tid)) ? sol.p_ij->at(pair_key(wid, tid)) : 0.0;
+    return sol.survival(tid) * (1.0 - p);
 }
 
 // ---------------------------------------------------------------------------
@@ -95,10 +98,28 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         portfolio::HeuristicId::H_ANTI_BOTTLENECK,
         portfolio::HeuristicId::H_OPPORTUNITY_LOCK,
     };
-    std::vector<int>    hh_uses(active_heuristics.size(), 0);
-    std::vector<double> hh_reward_sum(active_heuristics.size(), 0.0);
-    int                 hh_total_uses = 0;
+    constexpr int       phase_bins = 3;
+    std::array<std::vector<int>, phase_bins> hh_uses;
+    std::array<std::vector<double>, phase_bins> hh_reward_sum;
+    std::array<int, phase_bins> hh_total_uses = {0, 0, 0};
     constexpr double    ucb_c = 1.0;
+    constexpr int       reward_horizon_k = 7;
+    constexpr double    reward_gamma = 0.9;
+
+    for (int b = 0; b < phase_bins; ++b) {
+        hh_uses[b] = std::vector<int>(active_heuristics.size(), 0);
+        hh_reward_sum[b] = std::vector<double>(active_heuristics.size(), 0.0);
+    }
+
+    struct PendingCredit {
+        int phase_bin = 0;
+        int heuristic_idx = -1;
+        int age = 0;
+        double acc = 0.0;
+        double next_discount = 1.0;
+    };
+    std::vector<PendingCredit> pending_credits;
+    pending_credits.reserve(64);
 
     int initial_ammo_total = 0;
     for (auto& [wid, ammo] : sol.remaining_ammo) {
@@ -129,24 +150,48 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         }
         if (candidates.empty()) break;
 
+        // Coverage guard: if there are feasible untouched targets, prioritize them.
+        std::unordered_map<int, int> target_engaged_count;
+        for (const auto& [key, shots] : sol.k) {
+            if (shots <= 0) continue;
+            int tid = static_cast<int>(key & 0xFFFFFFFF);
+            target_engaged_count[tid] += shots;
+        }
+        std::vector<portfolio::Candidate> untouched_candidates;
+        untouched_candidates.reserve(candidates.size());
+        for (const auto& c : candidates) {
+            if (!target_engaged_count.count(c.tid))
+                untouched_candidates.push_back(c);
+        }
+        if (!untouched_candidates.empty())
+            candidates.swap(untouched_candidates);
+
         // Track feasible-weapon counts for H_OPPORTUNITY_LOCK in next step.
         std::unordered_map<int, int> cur_target_feasible_weapons;
         for (const auto& c : candidates) cur_target_feasible_weapons[c.tid]++;
 
-        // UCB1: try each heuristic at least once, then maximize mean + c * sqrt(log(N)/n).
+        double phase = 0.0;
+        if (initial_ammo_total > 0)
+            phase = std::min(1.0, static_cast<double>(step) / static_cast<double>(initial_ammo_total));
+
+        // UCB1 per phase-bin: try each heuristic once in the bin, then maximize mean + c*sqrt(log(N)/n).
+        int phase_bin = 0;
+        if (phase >= (2.0 / 3.0)) phase_bin = 2;
+        else if (phase >= (1.0 / 3.0)) phase_bin = 1;
+
         int chosen_h_idx = -1;
-        for (int i = 0; i < static_cast<int>(hh_uses.size()); ++i) {
-            if (hh_uses[i] == 0) {
+        for (int i = 0; i < static_cast<int>(hh_uses[phase_bin].size()); ++i) {
+            if (hh_uses[phase_bin][i] == 0) {
                 chosen_h_idx = i;
                 break;
             }
         }
         if (chosen_h_idx < 0) {
-            double logN = std::log(static_cast<double>(std::max(1, hh_total_uses)));
+            double logN = std::log(static_cast<double>(std::max(1, hh_total_uses[phase_bin])));
             double best_ucb = -std::numeric_limits<double>::infinity();
-            for (int i = 0; i < static_cast<int>(hh_uses.size()); ++i) {
-                double mean = hh_reward_sum[i] / static_cast<double>(hh_uses[i]);
-                double bonus = ucb_c * std::sqrt(logN / static_cast<double>(hh_uses[i]));
+            for (int i = 0; i < static_cast<int>(hh_uses[phase_bin].size()); ++i) {
+                double mean = hh_reward_sum[phase_bin][i] / static_cast<double>(hh_uses[phase_bin][i]);
+                double bonus = ucb_c * std::sqrt(logN / static_cast<double>(hh_uses[phase_bin][i]));
                 double ucb = mean + bonus;
                 if (ucb > best_ucb + eps) {
                     best_ucb = ucb;
@@ -154,10 +199,6 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
                 }
             }
         }
-
-        double phase = 0.0;
-        if (initial_ammo_total > 0)
-            phase = std::min(1.0, static_cast<double>(step) / static_cast<double>(initial_ammo_total));
 
         portfolio::SelectContext ctx;
         ctx.phase = phase;
@@ -192,10 +233,38 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         sol.commit(chosen_wid, chosen_tid, chosen_t);
 
         double obj_after = sol.objective();
-        double reward = obj_before - obj_after;
-        hh_uses[chosen_h_idx] += 1;
-        hh_reward_sum[chosen_h_idx] += reward;
-        hh_total_uses += 1;
+        double raw_reward = obj_before - obj_after;
+        double reward_denom = std::max(std::fabs(obj_before), 1e-9);
+        double reward = raw_reward / reward_denom;
+        reward = std::clamp(reward, -1.0, 1.0);
+
+        for (auto& pc : pending_credits) {
+            pc.acc += pc.next_discount * reward;
+            pc.next_discount *= reward_gamma;
+            pc.age += 1;
+        }
+
+        std::vector<PendingCredit> still_pending;
+        still_pending.reserve(pending_credits.size() + 1);
+        for (auto& pc : pending_credits) {
+            if (pc.age >= reward_horizon_k) {
+                hh_uses[pc.phase_bin][pc.heuristic_idx] += 1;
+                hh_reward_sum[pc.phase_bin][pc.heuristic_idx] += pc.acc;
+                hh_total_uses[pc.phase_bin] += 1;
+            } else {
+                still_pending.push_back(pc);
+            }
+        }
+        pending_credits.swap(still_pending);
+
+        PendingCredit cur;
+        cur.phase_bin = phase_bin;
+        cur.heuristic_idx = chosen_h_idx;
+        cur.age = 1;
+        cur.acc = reward;
+        cur.next_discount = reward_gamma;
+        pending_credits.push_back(cur);
+
         prev_target_feasible_weapons = std::move(cur_target_feasible_weapons);
         step += 1;
 
@@ -208,6 +277,14 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
             if (cache.count(w) && cache[w].empty()) cache.erase(w);
         }
     }
+
+    // Flush residual delayed credits at the end of construction.
+    for (const auto& pc : pending_credits) {
+        hh_uses[pc.phase_bin][pc.heuristic_idx] += 1;
+        hh_reward_sum[pc.phase_bin][pc.heuristic_idx] += pc.acc;
+        hh_total_uses[pc.phase_bin] += 1;
+    }
+
     return sol;
 }
 

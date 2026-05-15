@@ -18,12 +18,14 @@ static inline int slots_overlap(double a, double b, double s, double e, double d
 }
 
 // ---------------------------------------------------------------------------
-// score — pair score used only to rank targets for a chosen weapon
+// score — target score used in stage-1 target selection
 // ---------------------------------------------------------------------------
 static double score(const Solution& sol, int wid, int tid, double t,
                     int exclusive_cnt) {
-    (void)t; (void)wid; (void)exclusive_cnt;
-    return sol.survival(tid);
+    (void)t;
+    (void)wid;
+    (void)exclusive_cnt;
+    return sol.survival(tid) * sol.threat_score.at(tid);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,66 +91,83 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
                 best_sc = std::max(best_sc, cs.sc);
         if (best_sc <= 0.0) break;
 
-        // Regret-based weapon choice:
-        //   1) For each weapon, compute best and second-best eligible actions.
-        //   2) Pick weapon by priority = (best-second) + rho*best.
-        //   3) Execute that weapon's best action by main score.
+        // Two-stage lexicographic choice:
+        //   1) Pick a target from RCL by target score, then threat, then earliest close.
+        //   2) For that target, pick weapon by scarcity, then exclusivity, then earliest fire time.
         constexpr double eps = 1e-12;
-        constexpr double rho = 0.05;
         double threshold = (1.0 - alpha) * best_sc;
 
         bool   have_choice = false;
         int    chosen_wid  = -1;
         int    chosen_tid  = -1;
         double chosen_t    = 0.0;
-        double chosen_best = -std::numeric_limits<double>::infinity();
-        double chosen_pri  = -std::numeric_limits<double>::infinity();
+        int    selected_tid = -1;
+        double selected_sc  = -std::numeric_limits<double>::infinity();
+        double selected_th  = -std::numeric_limits<double>::infinity();
+        double selected_we  = std::numeric_limits<double>::infinity();
 
+        // Stage 1: choose target using target score and target-side tie-breaks.
         for (auto& [wid, inner] : cache) {
-            int    best_tid  = -1;
-            double best_t    = 0.0;
-            double best_sc_w = -std::numeric_limits<double>::infinity();
-            double second_sc = -std::numeric_limits<double>::infinity();
-
             for (auto& [tid, cs] : inner) {
                 if (cs.sc + eps < threshold) continue;
 
-                if (cs.sc > best_sc_w + eps ||
-                    (std::fabs(cs.sc - best_sc_w) <= eps &&
-                     (sol.threat_score.at(tid) > sol.threat_score.at(best_tid) + eps ||
-                      (std::fabs(sol.threat_score.at(tid) - sol.threat_score.at(best_tid)) <= eps &&
-                       (tid < best_tid || (tid == best_tid && cs.t < best_t)))))) {
-                    second_sc = best_sc_w;
-                    best_sc_w = cs.sc;
-                    best_tid  = tid;
-                    best_t    = cs.t;
-                } else if (cs.sc > second_sc + eps) {
-                    second_sc = cs.sc;
+                uint64_t key = pair_key(wid, tid);
+                auto w_it = sol.windows->find(key);
+                double window_end = (w_it == sol.windows->end())
+                    ? std::numeric_limits<double>::infinity()
+                    : w_it->second.second;
+                double th = sol.threat_score.at(tid);
+
+                if (selected_tid < 0 ||
+                    cs.sc > selected_sc + eps ||
+                    (std::fabs(cs.sc - selected_sc) <= eps &&
+                     (th > selected_th + eps ||
+                      (std::fabs(th - selected_th) <= eps &&
+                       (window_end < selected_we - eps ||
+                        (std::fabs(window_end - selected_we) <= eps && tid < selected_tid)))))) {
+                    selected_tid = tid;
+                    selected_sc  = cs.sc;
+                    selected_th  = th;
+                    selected_we  = window_end;
                 }
             }
+        }
 
-            if (best_tid < 0) continue;
-            if (!std::isfinite(second_sc)) second_sc = 0.0;
+        // Stage 2: choose weapon for selected target by weapon-side rules.
+        if (selected_tid >= 0) {
+            int best_scarcity = std::numeric_limits<int>::max();
+            int best_excl     = -1;
 
-            double regret = best_sc_w - second_sc;
-            double priority = regret + rho * best_sc_w;
+            for (auto& [wid, inner] : cache) {
+                auto it = inner.find(selected_tid);
+                if (it == inner.end()) continue;
+                const CS& cs = it->second;
+                if (cs.sc + eps < threshold) continue;
 
-            if (!have_choice ||
-                priority > chosen_pri + eps ||
-                (std::fabs(priority - chosen_pri) <= eps &&
-                 (best_sc_w > chosen_best + eps ||
-                  (std::fabs(best_sc_w - chosen_best) <= eps &&
-                    (sol.threat_score.at(best_tid) > sol.threat_score.at(chosen_tid) + eps ||
-                    (std::fabs(sol.threat_score.at(best_tid) - sol.threat_score.at(chosen_tid)) <= eps &&
-                     (wid < chosen_wid ||
-                      (wid == chosen_wid && (best_tid < chosen_tid ||
-                       (best_tid == chosen_tid && best_t < chosen_t)))))))))) {
-                have_choice = true;
-                chosen_wid  = wid;
-                chosen_tid  = best_tid;
-                chosen_t    = best_t;
-                chosen_best = best_sc_w;
-                chosen_pri  = priority;
+                int scarcity = static_cast<int>(inner.size());
+
+                int excl_live = 0;
+                for (auto& [j, cs2] : inner) {
+                    (void)cs2;
+                    auto tw_it = target_weapons.find(j);
+                    if (tw_it != target_weapons.end() && tw_it->second.size() == 1)
+                        ++excl_live;
+                }
+
+                if (!have_choice ||
+                    scarcity < best_scarcity ||
+                    (scarcity == best_scarcity &&
+                     (excl_live > best_excl ||
+                      (excl_live == best_excl &&
+                       (cs.t < chosen_t - eps ||
+                        (std::fabs(cs.t - chosen_t) <= eps && wid < chosen_wid)))))) {
+                    have_choice  = true;
+                    chosen_wid   = wid;
+                    chosen_tid   = selected_tid;
+                    chosen_t     = cs.t;
+                    best_scarcity = scarcity;
+                    best_excl     = excl_live;
+                }
             }
         }
 

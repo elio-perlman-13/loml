@@ -153,6 +153,7 @@ static inline SelectResult select_candidate(
 
 	switch (h) {
 		case HeuristicId::H_SURV:
+		// Choose weapon with regretted best survival impact: best - second-best, choose target by best survival
 			{
 				constexpr double rho = 0.05;
 				std::unordered_map<int, Candidate> best_by_weapon;
@@ -213,6 +214,7 @@ static inline SelectResult select_candidate(
 			}
 
 		case HeuristicId::H_SURV_THREAT_TIE:
+		// same as H_SURV, but break survival ties by threat score, then time, then weapon id, then target id
 			choose_global([&](const Candidate& a, const Candidate& b) {
 				return detail::better_surv_then_threat(sol, a, b);
 			});
