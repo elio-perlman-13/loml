@@ -1,6 +1,5 @@
 #pragma once
-#include "portfolio.hpp"
-#include "solution.hpp"
+#include "hh_utils.hpp"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -42,7 +41,7 @@ static double score(const Solution& sol, int wid, int tid, double t,
 //   target_weapons (reverse lookup) is built once; stale entries are harmless —
 //   try_score returns immediately when a pair is no longer live.
 // ---------------------------------------------------------------------------
-Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
+Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng, hh::UCBTable& ucb_table) {
     (void)rng;
     // Reverse lookup: tid -> weapons that initially target it
     std::unordered_map<int, std::vector<int>> target_weapons;
@@ -89,36 +88,22 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
     // UCB1 selector state over a fixed heuristic portfolio.
     const std::vector<portfolio::HeuristicId> active_heuristics = {
         portfolio::HeuristicId::H_SURV,
+        portfolio::HeuristicId::H_SURV_THREAT_TIE,
         portfolio::HeuristicId::H_EXCLUSIVE_GUARD,
+        portfolio::HeuristicId::H_WINDOW_URGENT,
         portfolio::HeuristicId::H_WINDOW_CLOSURE,
         portfolio::HeuristicId::H_COVER_FIRST,
+        portfolio::HeuristicId::H_EXCLUSIVE_RESERVE,
         portfolio::HeuristicId::H_BACKLOG_RELIEF,
         portfolio::HeuristicId::H_FINISH_STARTED,
         portfolio::HeuristicId::H_SPREAD_THEN_FOCUS,
         portfolio::HeuristicId::H_ANTI_BOTTLENECK,
         portfolio::HeuristicId::H_OPPORTUNITY_LOCK,
     };
-    constexpr int       phase_bins = 3;
-    std::array<std::vector<int>, phase_bins> hh_uses;
-    std::array<std::vector<double>, phase_bins> hh_reward_sum;
-    std::array<int, phase_bins> hh_total_uses = {0, 0, 0};
-    constexpr double    ucb_c = 1.0;
     constexpr int       reward_horizon_k = 7;
     constexpr double    reward_gamma = 0.9;
 
-    for (int b = 0; b < phase_bins; ++b) {
-        hh_uses[b] = std::vector<int>(active_heuristics.size(), 0);
-        hh_reward_sum[b] = std::vector<double>(active_heuristics.size(), 0.0);
-    }
-
-    struct PendingCredit {
-        int phase_bin = 0;
-        int heuristic_idx = -1;
-        int age = 0;
-        double acc = 0.0;
-        double next_discount = 1.0;
-    };
-    std::vector<PendingCredit> pending_credits;
+    std::vector<hh::PendingCredit> pending_credits;
     pending_credits.reserve(64);
 
     int initial_ammo_total = 0;
@@ -170,38 +155,13 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         std::unordered_map<int, int> cur_target_feasible_weapons;
         for (const auto& c : candidates) cur_target_feasible_weapons[c.tid]++;
 
-        double phase = 0.0;
-        if (initial_ammo_total > 0)
-            phase = std::min(1.0, static_cast<double>(step) / static_cast<double>(initial_ammo_total));
+        hh::ContextState context_state = hh::build_context_state(sol, candidates, initial_ammo_total);
+        std::size_t context_bin = hh::context_bin_index(context_state);
 
-        // UCB1 per phase-bin: try each heuristic once in the bin, then maximize mean + c*sqrt(log(N)/n).
-        int phase_bin = 0;
-        if (phase >= (2.0 / 3.0)) phase_bin = 2;
-        else if (phase >= (1.0 / 3.0)) phase_bin = 1;
-
-        int chosen_h_idx = -1;
-        for (int i = 0; i < static_cast<int>(hh_uses[phase_bin].size()); ++i) {
-            if (hh_uses[phase_bin][i] == 0) {
-                chosen_h_idx = i;
-                break;
-            }
-        }
-        if (chosen_h_idx < 0) {
-            double logN = std::log(static_cast<double>(std::max(1, hh_total_uses[phase_bin])));
-            double best_ucb = -std::numeric_limits<double>::infinity();
-            for (int i = 0; i < static_cast<int>(hh_uses[phase_bin].size()); ++i) {
-                double mean = hh_reward_sum[phase_bin][i] / static_cast<double>(hh_uses[phase_bin][i]);
-                double bonus = ucb_c * std::sqrt(logN / static_cast<double>(hh_uses[phase_bin][i]));
-                double ucb = mean + bonus;
-                if (ucb > best_ucb + eps) {
-                    best_ucb = ucb;
-                    chosen_h_idx = i;
-                }
-            }
-        }
+        std::size_t chosen_h_idx = ucb_table.select_arm(context_bin);
 
         portfolio::SelectContext ctx;
-        ctx.phase = phase;
+        ctx.phase = context_state.ammo_depletion;
         ctx.prev_target_feasible_weapons = prev_target_feasible_weapons.empty()
             ? nullptr
             : &prev_target_feasible_weapons;
@@ -211,6 +171,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
         if (!selected.found) {
             // Robust fallback when a restrictive heuristic yields no option.
             selected = portfolio::select_candidate(portfolio::HeuristicId::H_SURV, sol, candidates, ctx);
+            chosen_h_idx = 0;
         }
 
         if (!selected.found) break;
@@ -244,22 +205,20 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
             pc.age += 1;
         }
 
-        std::vector<PendingCredit> still_pending;
+        std::vector<hh::PendingCredit> still_pending;
         still_pending.reserve(pending_credits.size() + 1);
         for (auto& pc : pending_credits) {
             if (pc.age >= reward_horizon_k) {
-                hh_uses[pc.phase_bin][pc.heuristic_idx] += 1;
-                hh_reward_sum[pc.phase_bin][pc.heuristic_idx] += pc.acc;
-                hh_total_uses[pc.phase_bin] += 1;
+                ucb_table.record(pc.context_bin, pc.arm_idx, pc.acc);
             } else {
                 still_pending.push_back(pc);
             }
         }
         pending_credits.swap(still_pending);
 
-        PendingCredit cur;
-        cur.phase_bin = phase_bin;
-        cur.heuristic_idx = chosen_h_idx;
+        hh::PendingCredit cur;
+        cur.context_bin = context_bin;
+        cur.arm_idx = chosen_h_idx;
         cur.age = 1;
         cur.acc = reward;
         cur.next_discount = reward_gamma;
@@ -280,9 +239,7 @@ Solution& grasp_construction(Solution& sol, double alpha, std::mt19937& rng) {
 
     // Flush residual delayed credits at the end of construction.
     for (const auto& pc : pending_credits) {
-        hh_uses[pc.phase_bin][pc.heuristic_idx] += 1;
-        hh_reward_sum[pc.phase_bin][pc.heuristic_idx] += pc.acc;
-        hh_total_uses[pc.phase_bin] += 1;
+        ucb_table.record(pc.context_bin, pc.arm_idx, pc.acc);
     }
 
     return sol;
@@ -307,12 +264,13 @@ Solution grasp(
     std::mt19937 rng(seed);
     Solution     best;
     bool         have_best = false;
+    hh::UCBTable ucb_table(hh::ContextSpec::context_count(), 12, 1.0);
 
     for (int r = 0; r < restarts; ++r) {
         Solution sol = Solution::empty(
             weapons, targets, p_ij, windows,
             burst_dur, max_shots, vessel_id_map, horizon);
-        grasp_construction(sol, alpha, rng);
+        grasp_construction(sol, alpha, rng, ucb_table);
         if (!have_best || sol.objective() < best.objective()) {
             best      = sol;
             have_best = true;

@@ -194,7 +194,7 @@ static void write_solution(const Solution& sol, const std::string& path) {
 int main(int argc, char* argv[]) {
 	std::string scenario_path = "/workspaces/WTA/data/scenario_001.json";
 	std::string output_path;
-	int    restarts = 1;
+	int    restarts = 10;
 	double alpha    = 0.15;
 	uint32_t seed   = 42;
 
@@ -228,13 +228,14 @@ int main(int argc, char* argv[]) {
 	std::mt19937 rng(seed);
 	std::vector<Solution> solutions;
 	solutions.reserve(restarts);
+	hh::UCBTable ucb_table(hh::ContextSpec::context_count(), 12, 1.0);
 
 	auto t0 = std::chrono::steady_clock::now();
 	for (int r = 0; r < restarts; ++r) {
 		Solution sol = Solution::empty(
 			sc.weapons, sc.targets, sc.p_ij, sc.windows,
 			sc.burst_dur, sc.max_shots, sc.vessel_id_map, sc.horizon);
-		grasp_construction(sol, alpha, rng);
+		grasp_construction(sol, alpha, rng, ucb_table);
 		double obj = sol.objective();
 		std::cout << "  restart " << std::setw(3) << (r + 1) << "/" << restarts
 				  << "  obj=" << std::fixed << std::setprecision(6) << obj << "\n";
